@@ -104,29 +104,28 @@ export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes 
   if (r.error) throw new Error('jupiter swap err: ' + r.error);
   const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
   const ixs = [];
+  const _ins = (ins) => {
+    if (!ins || !ins.programId) return null;
+    const data = ins.data ? Buffer.from(ins.data, 'base64') : Buffer.alloc(0);
+    return new TransactionInstruction({
+      programId: new PublicKey(ins.programId),
+      keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
+      data,
+    });
+  };
   // setup (ATA create, dll)
   for (const ins of (r.setupInstructions || [])) {
-    ixs.push(new TransactionInstruction({
-      programId: new PublicKey(ins.programId),
-      keys: ins.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
-      data: Buffer.from(ins.data, 'base64'),
-    }));
+    const ix = _ins(ins); if (ix) ixs.push(ix);
   }
   // swap utama
   const si = r.swapInstruction;
-  ixs.push(new TransactionInstruction({
-    programId: new PublicKey(si.programId),
-    keys: si.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
-    data: Buffer.from(si.data, 'base64'),
-  }));
+  const swapIx = _ins(si);
+  if (!swapIx) throw new Error('jupiter swapInstruction invalid');
+  ixs.push(swapIx);
   // cleanup (close WSOL)
   if (r.cleanupInstruction) {
-    const ci = r.cleanupInstruction;
-    ixs.push(new TransactionInstruction({
-      programId: new PublicKey(ci.programId),
-      keys: ci.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
-      data: Buffer.from(ci.data, 'base64'),
-    }));
+    const ci = _ins(r.cleanupInstruction);
+    if (ci) ixs.push(ci);
   }
   return { ixs, outAmount: q.outAmount };
 }
