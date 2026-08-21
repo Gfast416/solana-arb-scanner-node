@@ -28,7 +28,9 @@ async function executeSol(opp, payer) {
   if (!r.ok) return console.log(`   [SKIP] ${r.reason}`);
   console.log(`   [BUILD OK] engine: ${r.engine} | sim profit: ${r.profit_sol?.toFixed(6)} SOL`);
   if (DRY_RUN) { console.log('   [DRY_RUN] not submitting (set DRY_RUN=false to execute)'); return; }
-  if (r.profit_sol <= 0) { console.log('   [SKIP] no profit'); return; }
+  // GUARD: cuma submit kalau profit nyata > tip + buffer (jangan rugi tip doang)
+  const MIN_NET = (TIP + 2_000_000) / 1e9; // tip + 0.002 SOL buffer
+  if (r.profit_sol <= MIN_NET) { console.log(`   [SKIP] profit ${r.profit_sol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} SOL`); return; }
   // submit via Jito
   const fetchJITO = async (raw) => fetch(`https://frankfurt.bundle-router.jito.wtf/api/v1/bundles`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
