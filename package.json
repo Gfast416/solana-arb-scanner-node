@@ -1,0 +1,17 @@
+{
+  "name": "solana-arb-scanner",
+  "version": "1.0.0",
+  "description": "Solana arbitrage scanner + 1-tx atomic executor (Jito). Node.js.",
+  "type": "module",
+  "main": "executor.js",
+  "scripts": {
+    "start": "node run.js",
+    "dry": "node executor.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "@solana/spl-token": "^0.4.8",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5"
+  }
+}
