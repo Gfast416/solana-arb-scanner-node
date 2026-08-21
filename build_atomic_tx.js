@@ -22,19 +22,19 @@ async function _postJson(url, payload, headers = {}) {
 
 export async function getQuote(inputMint, outputMint, amount, slippageBps = 50, extra = {}) {
   async function _try(useFilter) {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const params = new URLSearchParams({
           inputMint, outputMint, amount: String(amount), slippageBps: String(slippageBps),
         });
         if (useFilter && extra.dexes) extra.dexes.forEach(d => params.append('dexes[]', d));
-        const r = await fetch(`${JUP_QUOTE}?${params}`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const r = await fetch(`${JUP_QUOTE}?${params}`, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' } });
         if (r.ok) {
           const j = await r.json();
           if (j && j.outAmount) return j;
         }
       } catch (e) { /* retry */ }
-      await new Promise(res => setTimeout(res, 400 * (attempt + 1)));
+      await new Promise(res => setTimeout(res, 600 * (attempt + 1)));
     }
     return null;
   }

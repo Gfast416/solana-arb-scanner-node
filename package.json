@@ -9,6 +9,7 @@
     "dry": "node executor.js"
   },
   "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0",
     "@meteora-ag/dlmm-sdk": "^0.7.7",
     "@orca-so/whirlpools-sdk": "^0.22.0",
     "@raydium-io/raydium-sdk-v2": "^0.2.61-alpha",

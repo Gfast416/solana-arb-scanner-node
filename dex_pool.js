@@ -2,7 +2,7 @@
 // beli di DEX_A, jual di DEX_B, 1 VersionedTransaction
 import { Connection, Keypair, PublicKey, SystemProgram, VersionedTransaction, TransactionMessage } from '@solana/web3.js';
 import { USDC, JITO_TIP_ACCOUNT, nextRpcUrl } from './config.js';
-import { raydiumSwapIx, orcaSwapIx, jupiterSwapIx } from './dex_swap.js';
+import { raydiumSwapIx, orcaSwapIx, meteoraSwapIx, jupiterSwapIx } from './dex_swap.js';
 
 function dexEngine(dex) {
   const d = (dex || '').toLowerCase();
@@ -30,6 +30,7 @@ export async function buildCrossDexAtomic(opp, payer, amountInUsd = 1_000_000, t
   try {
     if (eBuy === 'raydium') leg1 = await raydiumSwapIx(payer, buyPool, USDC, amountInUsd);
     else if (eBuy === 'orca') leg1 = await orcaSwapIx(payer, buyPool, USDC, amountInUsd, USDC === 'So11111111111111111111111111111111111111112' ? false : true);
+    else if (eBuy === 'meteora') leg1 = await meteoraSwapIx(payer, buyPool, USDC, amountInUsd, true);
     else leg1 = await jupiterSwapIx(payer, USDC, tokenMint, amountInUsd, ['meteora']);
   } catch (e) { return { ok: false, reason: `leg1 ${eBuy} failed: ${e.message}` }; }
 
@@ -38,6 +39,7 @@ export async function buildCrossDexAtomic(opp, payer, amountInUsd = 1_000_000, t
   try {
     if (eSell === 'raydium') leg2 = await raydiumSwapIx(payer, sellPool, tokenMint, leg1.outAmount);
     else if (eSell === 'orca') leg2 = await orcaSwapIx(payer, sellPool, tokenMint, leg1.outAmount, tokenMint === 'So11111111111111111111111111111111111111112' ? true : false);
+    else if (eSell === 'meteora') leg2 = await meteoraSwapIx(payer, sellPool, tokenMint, leg1.outAmount, false);
     else leg2 = await jupiterSwapIx(payer, tokenMint, USDC, leg1.outAmount, ['meteora']);
   } catch (e) { return { ok: false, reason: `leg2 ${eSell} failed: ${e.message}` }; }
 
