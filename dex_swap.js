@@ -48,6 +48,11 @@ export async function meteoraSwapIx(payer, poolAddrStr, inputMint, amount, aToB)
   const conn = program.provider.connection;
   const poolAddr = new PublicKey(poolAddrStr);
   const lbPair = await program.account.lbPair.fetch(poolAddr);
+  // Validasi: pool harus punya inputMint + USDC, kalau gak -> throw (skip, jangan rugi)
+  const tokX = lbPair.tokenXMint.toString(), tokY = lbPair.tokenYMint.toString();
+  const USDC_M = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  if (tokX !== inputMint && tokY !== inputMint) throw new Error('meteora pool token mismatch (input)');
+  if (tokX !== USDC_M && tokY !== USDC_M) throw new Error('meteora pool token mismatch (USDC)');
   const tokenX = { publicKey: lbPair.tokenXMint, reserve: lbPair.tokenXVault, amount: lbPair.tokenXAmount, decimal: lbPair.tokenXDecimal };
   const tokenY = { publicKey: lbPair.tokenYMint, reserve: lbPair.tokenYVault, amount: lbPair.tokenYAmount, decimal: lbPair.tokenYDecimal };
   const dlmm = new meta.LBCLMM(poolAddr, program, lbPair, null, tokenX, tokenY, { cluster: 'mainnet-beta' });

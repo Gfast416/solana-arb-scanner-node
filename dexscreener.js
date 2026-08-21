@@ -1,5 +1,6 @@
 // dexscreener.js — API DexScreener (gratis, no key)
 const BASE = 'https://api.dexscreener.com/latest/dex';
+const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 export async function _getJson(url, headers = {}) {
   const r = await fetch(url, { headers });
@@ -16,13 +17,21 @@ export async function searchToken(q, limit = 30) {
   return (d && d.pairs) ? d.pairs.slice(0, limit) : [];
 }
 
+// Pair HARUS TOKEN vs USDC (bukan vs token lain seperti MET) biar price可比 & bisa di-execute
+function isUsdcPair(p) {
+  const b = (p.baseToken?.address || '').toLowerCase();
+  const q = (p.quoteToken?.address || '').toLowerCase();
+  const u = USDC_MINT.toLowerCase();
+  return (b === u || q === u);
+}
+
 // Cari peluang misprice antar DEX untuk 1 token
 // Cap 50%: di atas itu biasanya price-feed error (decimal pool beda)
 export function findMispricing(pairs, thresholdPct = 3.0) {
   if (!pairs || !pairs.length) return [];
   const valid = pairs.filter(p => {
     const pr = parseFloat(p.priceUsd);
-    return p && p.dexId && !isNaN(pr) && pr > 0;
+    return p && p.dexId && !isNaN(pr) && pr > 0 && isUsdcPair(p);
   });
   const out = [];
   // hitung median price buat filter outlier (price kotor dari pool decimal beda)
