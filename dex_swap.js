@@ -165,37 +165,36 @@ export async function orcaSwapIx(payer, whirlpoolAddr, inputMint, amount, aToB) 
 
 // -------- JUPITER (dexes[] filter fallback, format baru: instructions terpisah) --------
 export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes = null) {
-  const q = await getQuote(inputMint, outputMint, amount, 50, dexes ? { dexes } : {});
-  if (!q || !q.outAmount) throw new Error('no jupiter quote');
-  const r = await fetch('https://api.jup.ag/swap/v1/swap-instructions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ quoteResponse: q, userPublicKey: payer.publicKey.toBase58(), wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, useSharedAccounts: true, prioritizationFeeLamports: 0 }),
-  }).then(res => res.json());
-  if (r.error) throw new Error('jupiter swap err: ' + r.error);
-  const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
-  const ixs = [];
-  const _ins = (ins) => {
-    if (!ins || !ins.programId) return null;
-    const data = ins.data ? Buffer.from(ins.data, 'base64') : Buffer.alloc(0);
-    return new TransactionInstruction({
-      programId: new PublicKey(ins.programId),
-      keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
-      data,
-    });
-  };
-  // setup (ATA create, dll)
-  for (const ins of (r.setupInstructions || [])) {
-    const ix = _ins(ins); if (ix) ixs.push(ix);
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const q = await getQuote(inputMint, outputMint, amount, 50, dexes ? { dexes } : {});
+      if (!q || !q.outAmount) throw new Error('no jupiter quote');
+      const r = await fetch('https://api.jup.ag/swap/v1/swap-instructions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quoteResponse: q, userPublicKey: payer.publicKey.toBase58(), wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, useSharedAccounts: true, prioritizationFeeLamports: 0 }),
+      }).then(res => res.json());
+      if (r.error) throw new Error('jupiter swap err: ' + r.error);
+      const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
+      const ixs = [];
+      const _ins = (ins) => {
+        if (!ins || !ins.programId) return null;
+        const data = ins.data ? Buffer.from(ins.data, 'base64') : Buffer.alloc(0);
+        return new TransactionInstruction({
+          programId: new PublicKey(ins.programId),
+          keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
+          data,
+        });
+      };
+      for (const ins of (r.computeBudgetInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
+      for (const ins of (r.setupInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
+      const swapIx = _ins(r.swapInstruction);
+      if (!swapIx) throw new Error('jupiter swapInstruction invalid');
+      ixs.push(swapIx);
+      if (r.cleanupInstruction) { const ci = _ins(r.cleanupInstruction); if (ci) ixs.push(ci); }
+      for (const ins of (r.otherInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
+      return { ixs, outAmount: q.outAmount };
+    } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 400)); }
   }
-  // swap utama
-  const si = r.swapInstruction;
-  const swapIx = _ins(si);
-  if (!swapIx) throw new Error('jupiter swapInstruction invalid');
-  ixs.push(swapIx);
-  // cleanup (close WSOL)
-  if (r.cleanupInstruction) {
-    const ci = _ins(r.cleanupInstruction);
-    if (ci) ixs.push(ci);
-  }
-  return { ixs, outAmount: q.outAmount };
+  throw new Error(lastErr?.message || 'jupiterSwapIx failed');
 }

@@ -44,13 +44,16 @@ export async function resolvePoolForDex(dex, tokenMint) {
   }
   if (d.includes('orca')) {
     const r = await resolveOrca(tokenMint, USDC);
-    return r ? r.address : null;
+    return r ? r.address : 'jupiter'; // fallback to jupiter dexes[orca] if no on-chain pool
   }
   return null;
 }
 
 async function swapLeg(payer, dex, pool, inputMint, outputMint, amount) {
   const d = (dex || '').toLowerCase();
+  if (pool === 'jupiter' || !pool) {
+    return jupiterSwapIx(payer, inputMint, outputMint, amount, [d.replace(/[^a-z]/g, '')]);
+  }
   if (d.includes('raydium')) {
     try { return await raydiumSwapIx(payer, pool, inputMint, amount); }
     catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['raydium']); }
