@@ -46,8 +46,10 @@ export function findMispricing(pairs, thresholdPct = 3.0) {
         out.push({
           type: 'cross_dex',
           token: a.baseToken.symbol,
+          token_addr: a.baseToken.address,
           dexA: a.dexId, priceA: pa,
           dexB: b.dexId, priceB: pb,
+          pairA: a.pairAddress, pairB: b.pairAddress,
           pct: +diff.toFixed(2),
           route: `buy@${pa < pb ? a.dexId : b.dexId} -> sell@${pa < pb ? b.dexId : a.dexId}`,
           profit_pct: +diff.toFixed(2),
