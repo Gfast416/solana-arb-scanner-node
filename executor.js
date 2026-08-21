@@ -12,6 +12,7 @@ const RPC_URLS = getRpcUrls();
 const RPC_HTTP = RPC_URLS[0];
 const WALLET_PK = process.env.WALLET_PRIVATE_KEY;
 const USE_JITO = (process.env.USE_JITO || 'true') === 'true';
+export { USE_JITO };
 const MIN_PROFIT = parseFloat(process.env.MIN_PROFIT_PCT || '1.0');
 const JITO_TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
 const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
@@ -36,8 +37,10 @@ export async function findOpportunity() {
   return opps.length ? [opps[0], opps[0].profit_pct] : null;
 }
 
-// USDC->TOKEN->USDC via Jupiter, 1 ATOMIC tx (V0 + Jito tip, fee=0)
-export async function executeTriangular(tokenMint, amountIn = 1_000_000) {
+// Execute opp: cross_dex & triangular sama2 = USDC->TOKEN->USDC via Jupiter, 1 ATOMIC tx
+export async function executeOpportunity(opp, amountIn = 1_000_000) {
+  const tokenMint = opp.token_addr;
+  if (!tokenMint) return [null, 'no token_addr'];
   const rpcUrl = nextRpcUrl();
   const conn = new Connection(rpcUrl, 'confirmed');
   const payer = loadKeypair(WALLET_PK);

@@ -25,10 +25,22 @@ export function findMispricing(pairs, thresholdPct = 3.0) {
     return p && p.dexId && !isNaN(pr) && pr > 0;
   });
   const out = [];
+  // hitung median price buat filter outlier (price kotor dari pool decimal beda)
+  const prices = valid.map(p => parseFloat(p.priceUsd)).sort((x, y) => x - y);
+  const median = prices[Math.floor(prices.length / 2)] || 0;
   for (let i = 0; i < valid.length; i++) {
     for (let j = i + 1; j < valid.length; j++) {
       const a = valid[i], b = valid[j];
+      // FILTER 1: DEX harus beda (gak bandingin meteora vs meteora)
+      if (a.dexId === b.dexId) continue;
       const pa = parseFloat(a.priceUsd), pb = parseFloat(b.priceUsd);
+      // FILTER 2: outlier — 1 price >10x median atau <0.1x median = price kotor
+      if (median > 0 && (pa > median * 10 || pa < median * 0.1)) continue;
+      if (median > 0 && (pb > median * 10 || pb < median * 0.1)) continue;
+      // FILTER 3: likuiditas minimal $100 biar gak false positive (USD2 dll likuiditas kecil)
+      const liqA = Number(a.liquidity?.usd || 0);
+      const liqB = Number(b.liquidity?.usd || 0);
+      if (liqA < 100 || liqB < 100) continue;
       const diff = Math.abs(pa - pb) / Math.min(pa, pb) * 100;
       if (diff >= thresholdPct && diff <= 50) {
         out.push({

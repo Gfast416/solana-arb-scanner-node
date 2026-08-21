@@ -1,5 +1,5 @@
 // run.js — loop otomatis detect -> execute
-import { findOpportunity, executeTriangular, loadKeypair } from './executor.js';
+import { findOpportunity, executeOpportunity, loadKeypair, USE_JITO } from './executor.js';
 import { WATCH_TOKENS } from './config.js';
 
 async function loop() {
@@ -14,8 +14,8 @@ async function loop() {
         const [o, pct] = opp;
         console.log(`\n[${new Date().toISOString()}] OPP ${o.type} ${o.token} ${pct}%`);
         console.log(`   route: ${o.route}`);
-        if (o.token_addr && (await import('./executor.js')).USE_JITO) {
-          const [bid, info] = await executeTriangular(o.token_addr, 1_000_000);
+        if (o.token_addr && USE_JITO) {
+          const [bid, info] = await executeOpportunity(o, 1_000_000);
           if (bid) console.log(`   [SUBMITTED] bundle ${bid} | profit~$${info.profit_usd}`);
           else console.log(`   [SKIP] ${info}`);
         }
