@@ -6,8 +6,10 @@ import { Keypair, Connection, VersionedTransaction } from '@solana/web3.js';
 import { runAllMethods } from './methods.js';
 import { buildAtomicTx, getQuote, USDC, SOL } from './build_atomic_tx.js';
 import { WATCH_TOKENS } from './config.js';
+import { getRpcUrls, nextRpcUrl } from './config.js';
 
-const RPC_HTTP = process.env.RPC_HTTP || 'https://api.mainnet-beta.solana.com';
+const RPC_URLS = getRpcUrls();
+const RPC_HTTP = RPC_URLS[0];
 const WALLET_PK = process.env.WALLET_PRIVATE_KEY;
 const USE_JITO = (process.env.USE_JITO || 'true') === 'true';
 const MIN_PROFIT = parseFloat(process.env.MIN_PROFIT_PCT || '1.0');
@@ -36,7 +38,8 @@ export async function findOpportunity() {
 
 // USDC->TOKEN->USDC via Jupiter, 1 ATOMIC tx (V0 + Jito tip, fee=0)
 export async function executeTriangular(tokenMint, amountIn = 1_000_000) {
-  const conn = new Connection(RPC_HTTP, 'confirmed');
+  const rpcUrl = nextRpcUrl();
+  const conn = new Connection(rpcUrl, 'confirmed');
   const payer = loadKeypair(WALLET_PK);
   const q1 = await getQuote(USDC, tokenMint, amountIn);
   if (!q1 || !q1.outAmount) return [null, 'no quote1'];

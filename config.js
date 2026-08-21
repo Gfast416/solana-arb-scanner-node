@@ -1,4 +1,24 @@
-// config.js — DEX program IDs, token watchlist, threshold
+// config.js — DEX program IDs, token watchlist, threshold, multi-RPC
+
+// Multi-RPC: pisahkan dengan koma di .env (RPC_URLS=a,b,c)
+// Atau RPC_HTTP single (backward compatible)
+export function getRpcUrls() {
+  if (process.env.RPC_URLS) {
+    return process.env.RPC_URLS.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (process.env.RPC_HTTP) return [process.env.RPC_HTTP.trim()];
+  return ['https://api.mainnet-beta.solana.com'];
+}
+
+// Round-robin + failover RPC manager
+let _idx = 0;
+export function nextRpcUrl() {
+  const urls = getRpcUrls();
+  const u = urls[_idx % urls.length];
+  _idx = (_idx + 1) % urls.length;
+  return u;
+}
+
 export const DEX_PROGRAM_IDS = {
   RAYDIUM_V4: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
   RAYDIUM_CPMM: 'CPMMoo8L3F4NbTegBCKVNunggAiXnqqN1DZG1fekEju6',

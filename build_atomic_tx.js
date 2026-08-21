@@ -6,6 +6,7 @@ import {
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { USDC, SOL, JITO_TIP_ACCOUNT } from './config.js';
+import { nextRpcUrl } from './config.js';
 
 const JUP_QUOTE = 'https://api.jup.ag/swap/v1/quote';
 const JUP_SWAP = 'https://api.jup.ag/swap/v1/swap';
@@ -42,6 +43,8 @@ async function getSwapInstructionsRaw(quote, userPubkey) {
 
 // Gabungin banyak swap jadi 1 VersionedTransaction (V0 + ALT) + Jito tip
 export async function buildAtomicTx(quotes, payer, connection, tipLamports = 5000) {
+  const rpcUrl = nextRpcUrl();
+  const conn = connection || new Connection(rpcUrl, 'confirmed');
   const user = payer.publicKey;
   const allIxs = [];
   const altMap = new Map(); // key -> AddressLookupTableAccount
