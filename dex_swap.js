@@ -8,14 +8,15 @@ import { getQuote } from './build_atomic_tx.js';
 import { nextRpcUrl } from './config.js';
 import meta from '@meteora-ag/dlmm-sdk';
 import { AnchorProvider, Program } from '@coral-xyz/anchor';
+import { BN as ABN } from '@coral-xyz/anchor';
 import { readFileSync } from 'fs';
 import path from 'path';
 
 // ---- Patched meteora swapQuote (normalize BN args) ----
 const _origSwapQuote = meta.LBCLMM.prototype.swapQuote;
 meta.LBCLMM.prototype.swapQuote = function (inAmount, swapForY, allowedSlippage, binArrays) {
-  const amt = (inAmount && inAmount.isZero) ? inAmount : new BN(inAmount.toString());
-  const slip = (allowedSlippage && allowedSlippage.isZero) ? allowedSlippage : new BN(allowedSlippage.toString());
+  const amt = (inAmount && inAmount.isZero) ? inAmount : new ABN(inAmount.toString());
+  const slip = (allowedSlippage && allowedSlippage.isZero) ? allowedSlippage : new ABN(allowedSlippage.toString());
   return _origSwapQuote.call(this, amt, swapForY, slip, binArrays);
 };
 const METEORA_IDL = JSON.parse(readFileSync(path.join(process.cwd(), 'meteora_idl.json'), 'utf8'));
@@ -41,19 +42,17 @@ export async function meteoraSwapIx(payer, poolAddrStr, inputMint, amount, aToB)
   const dlmm = new meta.LBCLMM(poolAddr, program, lbPair, null, tokenX, tokenY, { cluster: 'mainnet-beta' });
   const binArrays = await dlmm.getBinArrays();
   const inMint = new PublicKey(inputMint);
-  const swapForY = inMint.equals(new PublicKey(lbPair.tokenXMint)); // X->Y = swapForY true
-  const quote = await dlmm.swapQuote(inMint, new BN(amount.toString()), 100, binArrays);
-  // build swap tx via SDK (includes ATA setup)
+  const swapForY = inMint.equals(new PublicKey(lbPair.tokenXMint));
+  const quote = await dlmm.swapQuote(new ABN(amount.toString()), swapForY, 100, binArrays);
   const tx = await dlmm.swap({
     inToken: inMint,
     outToken: swapForY ? new PublicKey(lbPair.tokenYMint) : new PublicKey(lbPair.tokenXMint),
-    inAmount: new BN(amount.toString()),
+    inAmount: new ABN(amount.toString()),
     minOutAmount: quote.minOutAmount,
     lbPair: poolAddr,
     user: payer.publicKey,
     binArraysPubkey: quote.binArraysPubkey,
   });
-  // tx.instructions = array TransactionInstruction (termasuk ATA + swap)
   return { ixs: tx.instructions, outAmount: quote.minOutAmount.toString() };
 }
 
