@@ -58,13 +58,20 @@ async function swapLeg(payer, dex, pool, inputMint, outputMint, amount) {
     try { return await raydiumSwapIx(payer, pool, inputMint, amount); }
     catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['raydium']); }
   }
-  if (d.includes('orca')) return orcaSwapIx(payer, pool, inputMint, amount, true);
-  if (d.includes('meteora')) return meteoraSwapIx(payer, pool, inputMint, amount, true);
+  if (d.includes('orca')) {
+    try { return await orcaSwapIx(payer, pool, inputMint, amount, true); }
+    catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['orca']); }
+  }
+  if (d.includes('meteora')) {
+    try { return await meteoraSwapIx(payer, pool, inputMint, amount, true); }
+    catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['meteora']); }
+  }
   return jupiterSwapIx(payer, inputMint, outputMint, amount, [d.replace(/[^a-z]/g, '')]);
 }
 
 // opp: { token_addr, dexA, dexB, priceA, priceB }
 export async function buildSolRouter(opp, payer, solAmountLamports = 1_000_000, tipLamports = 5000) {
+ try {
   const tokenMint = opp.token_addr;
   const buyDex = opp.priceA < opp.priceB ? opp.dexA : opp.dexB;
   const sellDex = opp.priceA < opp.priceB ? opp.dexB : opp.dexA;
@@ -105,4 +112,7 @@ export async function buildSolRouter(opp, payer, solAmountLamports = 1_000_000, 
   vtx.sign([payer]);
   const raw = Buffer.from(vtx.serialize()).toString('base64');
   return { ok: true, raw, profit_sol: profit, engine: `sol->usdc->${buyDex}->${sellDex}->sol` };
+ } catch(e) {
+  return { ok: false, reason: 'builderr: ' + e.message?.slice(0, 60), profit_sol: 0 };
+ }
 }

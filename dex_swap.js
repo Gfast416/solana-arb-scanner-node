@@ -179,12 +179,15 @@ export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes 
       const ixs = [];
       const _ins = (ins) => {
         if (!ins || !ins.programId) return null;
-        const data = ins.data ? Buffer.from(ins.data, 'base64') : Buffer.alloc(0);
-        return new TransactionInstruction({
-          programId: new PublicKey(ins.programId),
-          keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
-          data,
-        });
+        let data = Buffer.alloc(0);
+        try { if (ins.data) data = Buffer.from(ins.data, 'base64'); } catch (e) { return null; }
+        try {
+          return new TransactionInstruction({
+            programId: new PublicKey(ins.programId),
+            keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
+            data,
+          });
+        } catch (e) { return null; }
       };
       for (const ins of (r.computeBudgetInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
       for (const ins of (r.setupInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
