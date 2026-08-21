@@ -53,10 +53,10 @@ async function safeExecute(rawBase64, profitSol, label) {
 
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return; }
 
-  // 2. Profit guard
-  const MIN_NET = (TIP + 2_000_000) / 1e9;
+  // 2. Profit guard — persentase dari modal (bukan fixed), biar test kecil gak false-skip
+  const MIN_NET = Math.max((TIP + 2_000_000) / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
   if (profitSol <= MIN_NET) {
-    log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)}`, 'err');
+    log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
     return;
   }
 

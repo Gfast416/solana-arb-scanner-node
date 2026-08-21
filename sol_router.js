@@ -13,9 +13,11 @@ function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
 
 async function buildQuotes(opp, solAmountLamports) {
   const tokenMint = opp.token_addr;
-  const q1 = await getQuote(SOL, tokenMint, solAmountLamports, 100, {});
+  // slippage 150 bps biar gak kena Jupiter 6025 (stale quote di simulate)
+  const SLIP = 150;
+  const q1 = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, {});
   if (!q1 || !q1.outAmount) throw new Error('no quote SOL->token');
-  const q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), 100, {});
+  const q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), SLIP, {});
   if (!q2 || !q2.outAmount) throw new Error('no quote token->SOL');
   const finalSol = Number(q2.outAmount);
   const profit = (finalSol - solAmountLamports) / 1e9;
