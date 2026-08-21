@@ -20,9 +20,12 @@ async function _postJson(url, payload, headers = {}) {
   return r.json();
 }
 
-export async function getQuote(inputMint, outputMint, amount, slippageBps = 50) {
-  const url = `${JUP_QUOTE}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`;
-  const r = await fetch(url);
+export async function getQuote(inputMint, outputMint, amount, slippageBps = 50, extra = {}) {
+  const params = new URLSearchParams({
+    inputMint, outputMint, amount: String(amount), slippageBps: String(slippageBps),
+  });
+  if (extra.dexes) extra.dexes.forEach(d => params.append('dexes[]', d));
+  const r = await fetch(`${JUP_QUOTE}?${params}`);
   if (!r.ok) return null;
   return r.json();
 }

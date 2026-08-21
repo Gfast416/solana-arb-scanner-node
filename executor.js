@@ -5,6 +5,7 @@ import bs58 from 'bs58';
 import { Keypair, Connection, VersionedTransaction } from '@solana/web3.js';
 import { runAllMethods } from './methods.js';
 import { buildAtomicTx, getQuote, USDC, SOL } from './build_atomic_tx.js';
+import { buildCrossDexAtomic } from './dex_pool.js';
 import { WATCH_TOKENS } from './config.js';
 import { getRpcUrls, nextRpcUrl } from './config.js';
 
@@ -37,31 +38,43 @@ export async function findOpportunity() {
   return opps.length ? [opps[0], opps[0].profit_pct] : null;
 }
 
-// Execute opp: cross_dex & triangular sama2 = USDC->TOKEN->USDC via Jupiter, 1 ATOMIC tx
+// Execute opp:
+//  - cross_dex  -> per-DEX atomic (beli di DEX_A, jual di DEX_B) via Jupiter dexes[] filter
+//  - triangular -> USDC->TOKEN->USDC via Jupiter aggregate (1 ATOMIC tx)
 export async function executeOpportunity(opp, amountIn = 1_000_000) {
   const tokenMint = opp.token_addr;
   if (!tokenMint) return [null, 'no token_addr'];
-  const rpcUrl = nextRpcUrl();
-  const conn = new Connection(rpcUrl, 'confirmed');
   const payer = loadKeypair(WALLET_PK);
-  const q1 = await getQuote(USDC, tokenMint, amountIn);
-  if (!q1 || !q1.outAmount) return [null, 'no quote1'];
-  const q2 = await getQuote(tokenMint, USDC, Math.floor(Number(q1.outAmount)));
-  if (!q2 || !q2.outAmount) return [null, 'no quote2'];
-  const out2 = Number(q2.outAmount);
-  const profit = out2 - amountIn;
-  if (profit <= 0) return [null, `no profit (${(profit/1e6).toFixed(4)} USD)`];
 
-  const vtx = await buildAtomicTx([q1, q2], payer, conn, JITO_TIP);
-  vtx.sign([payer]);
-  const raw = Buffer.from(vtx.serialize()).toString('base64');
+  let raw, profitUsd;
+  if (opp.type === 'cross_dex') {
+    const r = await buildCrossDexAtomic(opp, payer, amountIn, JITO_TIP);
+    if (!r.ok) return [null, r.reason || 'cross_dex build failed'];
+    raw = r.raw; profitUsd = r.profit_usd;
+  } else {
+    const rpcUrl = nextRpcUrl();
+    const conn = new Connection(rpcUrl, 'confirmed');
+    const q1 = await getQuote(USDC, tokenMint, amountIn);
+    if (!q1 || !q1.outAmount) return [null, 'no quote1'];
+    const q2 = await getQuote(tokenMint, USDC, Math.floor(Number(q1.outAmount)));
+    if (!q2 || !q2.outAmount) return [null, 'no quote2'];
+    const out2 = Number(q2.outAmount);
+    const profit = out2 - amountIn;
+    if (profit <= 0) return [null, `no profit (${(profit/1e6).toFixed(4)} USD)`];
+    const vtx = await buildAtomicTx([q1, q2], payer, conn, JITO_TIP);
+    vtx.sign([payer]);
+    raw = Buffer.from(vtx.serialize()).toString('base64');
+    profitUsd = profit/1e6;
+  }
 
   if (USE_JITO) {
     const r = await fetchJITO(raw);
-    return [r?.result, { profit_usd: profit/1e6, bundle: r?.result }];
+    return [r?.result, { profit_usd: profitUsd, bundle: r?.result }];
   } else {
-    const sig = await conn.sendRawTransaction(vtx.serialize(), { skipPreflight: true });
-    return [sig, { profit_usd: profit/1e6, sig }];
+    const rpcUrl = nextRpcUrl();
+    const conn = new Connection(rpcUrl, 'confirmed');
+    const sig = await conn.sendRawTransaction(Buffer.from(raw, 'base64'), { skipPreflight: true });
+    return [sig, { profit_usd: profitUsd, sig }];
   }
 }
 
