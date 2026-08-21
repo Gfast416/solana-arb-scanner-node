@@ -30,10 +30,15 @@ export const DEX_PROGRAM_IDS = {
 // Threshold misprice antar DEX (persen). > ini = peluang.
 export const MISPRICE_THRESHOLD_PCT = 3.0;
 
-// Token lama yang di-track khusus (kasus AOW/USD2 style)
+// Token lama yang di-track khusus (kasus AOW/USD2 style) + token liquid buat execute
 export const WATCH_TOKENS = {
   '9AwxXsDhtpey1xTPvWvJjXy1uJ9g6Kq3ZVZ8kZv9pump': 'AOW9',
   'CaNC8DjrRuY17zrqNyHKYD91pVofPsXchFr1kh2nsfUw': 'USD2',
+  // Token liquid (Jupiter bisa route) — biar execute beneran jalan
+  'So11111111111111111111111111111111111111112': 'SOL',
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+  'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',
 };
 
 export const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
