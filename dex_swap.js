@@ -178,13 +178,14 @@ export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes 
       const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
       const ixs = [];
       const _ins = (ins) => {
-        if (!ins || !ins.programId) return null;
+        if (!ins || !ins.programId || typeof ins.programId !== 'string') return null;
+        if (ins.accounts && !Array.isArray(ins.accounts)) return null;
         let data = Buffer.alloc(0);
-        try { if (ins.data) data = Buffer.from(ins.data, 'base64'); } catch (e) { return null; }
+        try { if (typeof ins.data === 'string' && ins.data.length) data = Buffer.from(ins.data, 'base64'); } catch (e) { return null; }
         try {
           return new TransactionInstruction({
             programId: new PublicKey(ins.programId),
-            keys: (ins.accounts || []).map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
+            keys: (ins.accounts || []).filter(a => a && a.pubkey).map(a => ({ pubkey: new PublicKey(typeof a.pubkey === 'string' ? a.pubkey : a.pubkey.toBase58()), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
             data,
           });
         } catch (e) { return null; }

@@ -63,8 +63,8 @@ async function swapLeg(payer, dex, pool, inputMint, outputMint, amount) {
     catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['orca']); }
   }
   if (d.includes('meteora')) {
-    try { return await meteoraSwapIx(payer, pool, inputMint, amount, true); }
-    catch (e) { return await jupiterSwapIx(payer, inputMint, outputMint, amount, ['meteora']); }
+    // raw meteora fragile (anchor 0.29 BN encode bug) -> always use Jupiter dexes[meteora]
+    return jupiterSwapIx(payer, inputMint, outputMint, amount, ['meteora']);
   }
   return jupiterSwapIx(payer, inputMint, outputMint, amount, [d.replace(/[^a-z]/g, '')]);
 }
@@ -107,7 +107,7 @@ export async function buildSolRouter(opp, payer, solAmountLamports = 1_000_000, 
   ixs.push(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports }));
   const conn = new Connection(nextRpcUrl(), 'confirmed');
   const { blockhash } = await conn.getLatestBlockhash();
-  const msg = new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message([]);
+  const msg = new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToLegacyMessage();
   const vtx = new VersionedTransaction(msg);
   vtx.sign([payer]);
   const raw = Buffer.from(vtx.serialize()).toString('base64');

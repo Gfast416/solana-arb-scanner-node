@@ -8,6 +8,7 @@ import { loadKeypair, USE_JITO } from './executor.js';
 import { WATCH_TOKENS, nextRpcUrl, JITO_TIP_ACCOUNT } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouter } from './sol_router.js';
+import { findCircular, buildCircularTx } from './circular.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
 const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.5');
@@ -18,7 +19,7 @@ async function findSolOpp() {
   for (const tok of Object.keys(WATCH_TOKENS)) {
     const d = await pairsByToken(tok);
     const opps = findMispricing(d.pairs, MIN_PROFIT_PCT);
-    if (opps.length) return opps[0];
+    if (opps.length) return { type: 'cross_dex', opp: opps[0] };
   }
   return null;
 }
@@ -40,21 +41,45 @@ async function executeSol(opp, payer) {
   console.log(`   [SUBMITTED] bundle ${res?.result || JSON.stringify(res)?.slice(0,60)}`);
 }
 
+async function executeCircular(loop, payer) {
+  try {
+    const tx = await buildCircularTx(loop, payer, TIP);
+    console.log(`   [BUILD OK] circular ${loop.path.join('->')} | profit: ${loop.profit.toFixed(6)} SOL`);
+    if (DRY_RUN) { console.log('   [DRY_RUN] not submitting'); return; }
+    const MIN_NET = (TIP + 2_000_000) / 1e9;
+    if (loop.profit <= MIN_NET) { console.log(`   [SKIP] profit ${loop.profit.toFixed(6)} <= min net`); return; }
+    const fetchJITO = async (raw) => fetch(`https://frankfurt.bundle-router.jito.wtf/api/v1/bundles`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[raw]] }),
+    }).then(r => r.json());
+    const res = await fetchJITO(tx.raw);
+    console.log(`   [SUBMITTED] bundle ${res?.result || JSON.stringify(res)?.slice(0,60)}`);
+  } catch (e) { console.log(`   [SKIP] circular build: ${e.message?.slice(0,60)}`); }
+}
+
 async function loop() {
   console.log('='.repeat(60));
-  console.log(' SOL-CENTRIC ARB EXECUTOR (auto-adapt SOL->...->SOL)');
+  console.log(' SOL-CENTRIC ARB EXECUTOR (cross-dex + circular, auto-adapt)');
   console.log('='.repeat(60));
   console.log(` DRY_RUN: ${DRY_RUN} | MIN_PROFIT: ${MIN_PROFIT_PCT}% | SOL/test: ${SOL_AMOUNT/1e9}`);
   const payer = loadKeypair(process.env.WALLET_PRIVATE_KEY);
   console.log(` WALLET: ${payer.publicKey.toBase58()}`);
   while (true) {
     try {
+      // 1) cross-dex
       const opp = await findSolOpp();
       if (opp) {
-        console.log(`\n[${new Date().toISOString()}] OPP cross_dex ${opp.token} ${opp.pct}%  ${opp.route}`);
-        await executeSol(opp, payer);
+        console.log(`\n[${new Date().toISOString()}] OPP cross_dex ${opp.opp.token} ${opp.opp.pct}%  ${opp.opp.route}`);
+        await executeSol(opp.opp, payer);
       } else {
-        console.log(`[${new Date().toISOString()}] no opp, waiting...`);
+        // 2) circular multi-hop
+        const loop0 = await findCircular(SOL_AMOUNT);
+        if (loop0) {
+          console.log(`\n[${new Date().toISOString()}] OPP circular ${loop0.path.join('->')}  +${loop0.profit.toFixed(6)} SOL`);
+          await executeCircular(loop0, payer);
+        } else {
+          console.log(`[${new Date().toISOString()}] no opp, waiting...`);
+        }
       }
     } catch (e) { console.log('   loop err:', String(e).slice(0, 100)); }
     await new Promise(r => setTimeout(r, 15000));
