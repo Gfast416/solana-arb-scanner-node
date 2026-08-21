@@ -84,7 +84,30 @@ export async function resolveOrca(tokenA, tokenB) {
 export async function resolvePool(dex, tokenA, tokenB) {
   const d = dex.toLowerCase();
   if (d.includes('meteora')) return resolveMeteora(tokenA, tokenB);
-  if (d.includes('orca')) return resolveOrca(tokenA, tokenB);
-  // raydium: let caller use fetchPoolById (needs DexScreener pairAddress as fallback)
+  if (d.includes('orca') || d.includes('whirlpool')) return resolveOrca(tokenA, tokenB);
+  if (d.includes('raydium')) return resolveRaydium(tokenA, tokenB);
+  return null;
+}
+
+// Resolve Raydium CPMM pool on-chain (PDA: [AMM_CONFIG, tokenX, tokenY])
+const RAYDIUM_AMM_CONFIGS = [
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // V4 (legacy)
+  'CPMMoo8L3F4NbTegBCKVNunggAiXnqqN1DZG1fekEju6', // CPMM
+];
+export async function resolveRaydium(tokenA, tokenB) {
+  const A = new PublicKey(tokenA), B = new PublicKey(tokenB);
+  const [minMint, maxMint] = A.toBuffer().compare(B.toBuffer()) < 0 ? [A, B] : [B, A];
+  for (const cfg of RAYDIUM_AMM_CONFIGS) {
+    const cfgKey = new PublicKey(cfg);
+    const [addr] = PublicKey.findProgramAddressSync(
+      [cfgKey.toBuffer(), minMint.toBuffer(), maxMint.toBuffer()],
+      RAYDIUM_CPMM
+    );
+    try {
+      const conn = new Connection(nextRpcUrl(), 'confirmed');
+      const acc = await conn.getAccountInfo(addr);
+      if (acc) return { address: addr.toString(), config: cfg };
+    } catch (e) {}
+  }
   return null;
 }

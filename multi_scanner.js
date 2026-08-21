@@ -1,77 +1,67 @@
 // multi_scanner.js — DETEKSI misprice dari BANYAK SUMBER, lalu VALIDASI via Jupiter quote
-// Sumber deteksi: DexScreener + Meteora DLMM + Orca Whirlpool + Raydium CPMM (on-chain)
+// Sumber deteksi: DexScreener (primary, cepat) + Meteora/Orca/Raydium on-chain (bonus)
 // Gatekeeper: Jupiter quote (harga executable beneran -> profit nyata, gak false positive)
-import { Connection, PublicKey } from '@solana/web3.js';
-import { nextRpcUrl, SOL, USDC, WATCH_TOKENS } from './config.js';
+import { Connection } from '@solana/web3.js';
+import { nextRpcUrl, SOL, WATCH_TOKEN_LIST, AGGRESSIVE_THRESHOLD } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { getQuote } from './build_atomic_tx.js';
-import { resolveMeteora, resolveOrca } from './pool_resolver.js';
+import { resolveMeteora, resolveOrca, resolveRaydium } from './pool_resolver.js';
 
 const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora', whirlpool: 'orca' };
 function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
+export const DEX_LIST = ['meteora', 'orca', 'raydium'];
 
-// ---- Kandidat dari DexScreener (cepat, gratis) ----
+// ---- Kandidat dari DexScreener (cepat, parallel semua token) ----
 async function scanDexScreener(minPct) {
   const out = [];
-  for (const tok of Object.keys(WATCH_TOKENS)) {
+  const tokens = WATCH_TOKEN_LIST;
+  await Promise.all(tokens.map(async ([mint, sym]) => {
     try {
-      const d = await pairsByToken(tok);
-      if (!d?.pairs) continue;
+      const d = await pairsByToken(mint);
+      if (!d?.pairs) return;
       const opps = findMispricing(d.pairs, minPct).filter(o => o.token_addr && o.token_addr !== SOL);
-      for (const o of opps) out.push({ token: o.token, token_addr: o.token_addr, dexA: o.dexA, dexB: o.dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscreener' });
+      for (const o of opps) out.push({ token: o.token, token_addr: o.token_addr, dexA: o.dexA, dexB: o.dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscrest' });
     } catch (_) {}
-  }
+  }));
   return out;
 }
 
-// ---- Kandidat dari on-chain pool (Meteora / Orca / Raydium) ----
-// Baca harga pool SOL<->token di 2 DEX beda, bandingin. Akurat (gak stale kayak DexScreener).
-async function scanOnChain(minPct) {
+// ---- Kandidat on-chain (Meteora/Orca/Raydium) HANYA buat token yg dapet opp DexScreener ----
+// Gak brute-force semua token (biar cepat). Cross-check harga SOL<->token di 2 DEX.
+async function scanOnChainFor(tokenList) {
   const out = [];
-  const conn = new Connection(nextRpcUrl(), 'confirmed');
-  for (const tok of Object.keys(WATCH_TOKENS)) {
-    if (tok === SOL) continue;
-    const tokenMint = WATCH_TOKENS[tok];
-    if (!tokenMint || tokenMint === SOL) continue;
-    // Resolve pool di tiap DEX
+  await Promise.all(tokenList.map(async ([tokenMint, sym]) => {
+    if (!tokenMint || tokenMint === SOL) return;
     const pools = {};
     try { pools.meteora = await resolveMeteora(SOL, tokenMint); } catch {}
     try { pools.orca = await resolveOrca(SOL, tokenMint); } catch {}
-    // Raydium: resolve via Raydium SDK PDA (brute, optional)
-    // (skip kalau SDK berat; DexScreener udah nutupin raydium)
+    try { pools.raydium = await resolveRaydium(SOL, tokenMint); } catch {}
     const available = Object.entries(pools).filter(([k, v]) => v);
-    if (available.length < 2) continue;
-    // Ambil price pool dari on-chain (amount out untuk 0.01 SOL)
+    if (available.length < 2) return;
     const prices = {};
-    for (const [dex, pool] of available) {
+    await Promise.all(available.map(async ([dex]) => {
+      const jd = toJupDex(dex);
       try {
-        const q = await getQuote(SOL, tokenMint, 10_000_000, 50, { dexes: [toJupDex(dex)] });
-        if (q?.outAmount) prices[dex] = Number(q.outAmount); // token per 0.01 SOL
+        const q = await getQuote(SOL, tokenMint, 10_000_000, 50, jd ? { dexes: [jd] } : {});
+        if (q?.outAmount) prices[dex] = Number(q.outAmount);
       } catch {}
-    }
+    }));
     const dexs = Object.keys(prices);
     for (let i = 0; i < dexs.length; i++) for (let j = i + 1; j < dexs.length; j++) {
       const a = dexs[i], b = dexs[j];
       const pa = prices[a], pb = prices[b];
       const diff = Math.abs(pa - pb) / Math.min(pa, pb) * 100;
-      if (diff >= minPct && diff <= 50) {
-        // harga tinggi = jual disitu, rendah = beli disitu
+      if (diff >= 0.3 && diff <= 50) {
         const buyDex = pa < pb ? a : b;
         const sellDex = pa < pb ? b : a;
-        out.push({
-          token: tok, token_addr: tokenMint,
-          dexA: buyDex, dexB: sellDex,
-          priceA: pa, priceB: pb,
-          pct: +diff.toFixed(2), source: 'onchain'
-        });
+        out.push({ token: sym, token_addr: tokenMint, dexA: buyDex, dexB: sellDex, priceA: pa, priceB: pb, pct: +diff.toFixed(2), source: 'onchain' });
       }
     }
-  }
+  }));
   return out;
 }
 
 // ---- VALIDASI via Jupiter: beneran bisa eksekusi profit? ----
-// Ini GATEKEEPER: cuma opp yang lolos ini yang di-execute.
 export async function validateWithJupiter(opp, solAmount = 10_000_000) {
   const tokenMint = opp.token_addr;
   const buyDex = toJupDex(opp.dexA);
@@ -86,14 +76,21 @@ export async function validateWithJupiter(opp, solAmount = 10_000_000) {
   } catch { return null; }
 }
 
-// ---- Scan utama: gabungin semua sumber, dedupe, return kandidat ----
-export async function scanAll(minPct = 0.3) {
+// ---- Scan utama: DexScreener dulu (parallel), on-chain bonus buat token yg dapet opp ----
+export async function scanAll(minPct = AGGRESSIVE_THRESHOLD) {
   const seen = new Map();
   const push = (o) => {
     const key = `${o.token_addr}:${o.dexA}:${o.dexB}`;
     if (!seen.has(key) || o.pct > seen.get(key).pct) seen.set(key, o);
   };
-  const [ds, oc] = await Promise.all([scanDexScreener(minPct), scanOnChain(minPct)]);
-  ds.forEach(push); oc.forEach(push);
+  const ds = await scanDexScreener(minPct);
+  ds.forEach(push);
+  const uniqueTokens = [...new Set(ds.map(d => d.token_addr))].map(m => {
+    const t = ds.find(x => x.token_addr === m); return [m, t.token];
+  });
+  if (uniqueTokens.length) {
+    const oc = await scanOnChainFor(uniqueTokens);
+    oc.forEach(push);
+  }
   return [...seen.values()].sort((a, b) => b.pct - a.pct);
 }

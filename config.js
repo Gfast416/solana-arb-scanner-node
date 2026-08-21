@@ -30,15 +30,31 @@ export const DEX_PROGRAM_IDS = {
 // Threshold misprice antar DEX (persen). > ini = peluang.
 export const MISPRICE_THRESHOLD_PCT = 3.0;
 
-// Token lama yang di-track khusus (kasus AOW/USD2 style) + token liquid buat execute
+// Token liquid populer (Jupiter bisa route) — jangkauan luas biar banyak opp
 export const WATCH_TOKENS = {
-  // Token liquid (Jupiter bisa route) — biar execute beneran jalan
   'So11111111111111111111111111111111111111112': 'SOL',
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+  'Es9vMFrzaCERmJfrF4H2FYPMvAj7QUWxXPgZEJBJ41jW': 'USDT',
   'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
   'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
   'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',
-  // Buang AOW & USD2 dulu (sering false positive / illiquid)
+  '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr': 'POPCAT',
+  'ED5nyyWEzpPPiWimP8vYm7sD7TD3LNHzY68e1sS2yU7i': 'PNUT',
+  '2zMMhcaxmEPs4BhvKDy6uQtzRAr9PofC7oQiAYRZZqGK': 'MOODENG',
+  'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82': 'CHILLGUY',
+  'mSoLzYCxHdYgdziU2hgzXqwYpVKCuGJcQhWpfkY6c8X': 'MSOL',
+  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn': 'JTO',
+  'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3': 'PYTH',
+  '4k3Dyjzvzp8oP8rE4jWjfXkKpQ3DqVn7NqB6zZ8yV123': 'RAY',
 };
+// Bersihkan duplikat key biar gak double scan
+const _seen = {};
+export const WATCH_TOKEN_LIST = Object.entries(WATCH_TOKENS).filter(([k]) => {
+  if (_seen[k]) return false; _seen[k] = 1; return true;
+}).map(([k, v]) => [k, v]);
+
+// Agresivitas: threshold rendah + parallel scan
+export const AGGRESSIVE_THRESHOLD = parseFloat(process.env.AGGRESSIVE_THRESHOLD || '0.3');
 
 // Jupiter API key (opsional, kurangi 429). Set di .env: JUPITER_API_KEY=xxx
 export const JUPITER_API_KEY = process.env.JUPITER_API_KEY || '';
