@@ -93,7 +93,7 @@ export async function orcaSwapIx(payer, whirlpoolAddr, inputMint, amount, aToB) 
   return { ixs, outAmount: quote.estimatedAmountOut.toString() };
 }
 
-// -------- JUPITER (dexes[] filter fallback) --------
+// -------- JUPITER (dexes[] filter fallback, format baru: instructions terpisah) --------
 export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes = null) {
   const q = await getQuote(inputMint, outputMint, amount, 50, dexes ? { dexes } : {});
   if (!q || !q.outAmount) throw new Error('no jupiter quote');
@@ -102,15 +102,31 @@ export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes 
     body: JSON.stringify({ quoteResponse: q, userPublicKey: payer.publicKey.toBase58(), wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, useSharedAccounts: true, prioritizationFeeLamports: 0 }),
   }).then(res => res.json());
   if (r.error) throw new Error('jupiter swap err: ' + r.error);
-  const { VersionedTransaction } = await import('@solana/web3.js');
-  const vtx = VersionedTransaction.deserialize(Buffer.from(r.swapTransaction, 'base64'));
-  const msg = vtx.message;
-  const ixs = msg.compiledInstructions
-    .filter(ci => msg.staticAccountKeys[ci.programIdIndex].toBase58() !== 'ComputeBudget111111111111111111111111111111')
-    .map(ci => {
-      const programId = msg.staticAccountKeys[ci.programIdIndex];
-      const keys = ci.accountKeyIndexes.map(idx => ({ pubkey: msg.staticAccountKeys[idx], isSigner: false, isWritable: false }));
-      return new TransactionInstruction({ programId, keys, data: ci.data });
-    });
+  const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
+  const ixs = [];
+  // setup (ATA create, dll)
+  for (const ins of (r.setupInstructions || [])) {
+    ixs.push(new TransactionInstruction({
+      programId: new PublicKey(ins.programId),
+      keys: ins.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
+      data: Buffer.from(ins.data, 'base64'),
+    }));
+  }
+  // swap utama
+  const si = r.swapInstruction;
+  ixs.push(new TransactionInstruction({
+    programId: new PublicKey(si.programId),
+    keys: si.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
+    data: Buffer.from(si.data, 'base64'),
+  }));
+  // cleanup (close WSOL)
+  if (r.cleanupInstruction) {
+    const ci = r.cleanupInstruction;
+    ixs.push(new TransactionInstruction({
+      programId: new PublicKey(ci.programId),
+      keys: ci.accounts.map(a => ({ pubkey: new PublicKey(a.pubkey), isSigner: a.isSigner, isWritable: a.isWritable })),
+      data: Buffer.from(ci.data, 'base64'),
+    }));
+  }
   return { ixs, outAmount: q.outAmount };
 }
