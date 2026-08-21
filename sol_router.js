@@ -6,22 +6,26 @@ import { Connection, Keypair, PublicKey, SystemProgram, VersionedTransaction } f
 import { USDC, SOL, JITO_TIP_ACCOUNT, nextRpcUrl } from './config.js';
 import { getQuote, buildAtomicTx } from './build_atomic_tx.js';
 
-// Build quotes untuk 4-leg route. dexes di-pass ke getQuote biar route spesifik DEX.
-// Hanya DEX yang Jupiter support (raydium/orca/meteora). Lainnya skip filter (biarin Jupiter pilih).
-const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora' };
+// DEX mapping Jupiter (case-sensitive di API)
+const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora', whirlpool: 'whirlpool', 'raydium-clmm': 'raydium-clmm' };
 function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
 
 async function buildQuotes(opp, solAmountLamports) {
   const tokenMint = opp.token_addr;
-  // slippage 150 bps biar gak kena Jupiter 6025 (stale quote di simulate)
-  const SLIP = 150;
-  const q1 = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, {});
-  if (!q1 || !q1.outAmount) throw new Error('no quote SOL->token');
-  const q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), SLIP, {});
-  if (!q2 || !q2.outAmount) throw new Error('no quote token->SOL');
+  const SLIP = 150; // slippage biar gak kena 6025
+  // Tentukan buy/sell DEX dari misprice (priceA < priceB -> beli di A, jual di B)
+  const buyDexRaw = opp.priceA < opp.priceB ? opp.dexA : opp.dexB;
+  const sellDexRaw = opp.priceA < opp.priceB ? opp.dexB : opp.dexA;
+  const buyDex = toJupDex(buyDexRaw);
+  const sellDex = toJupDex(sellDexRaw);
+  // FORCE route ke DEX spesifik biar exploit misprice beneran (gak round-trip aggregate)
+  const q1 = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, buyDex ? { dexes: [buyDex] } : {});
+  if (!q1 || !q1.outAmount) throw new Error('no quote SOL->token @' + buyDex);
+  const q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), SLIP, sellDex ? { dexes: [sellDex] } : {});
+  if (!q2 || !q2.outAmount) throw new Error('no quote token->SOL @' + sellDex);
   const finalSol = Number(q2.outAmount);
   const profit = (finalSol - solAmountLamports) / 1e9;
-  return { quotes: [q1, q2], profit, engine: `sol->${opp.token_symbol||'token'}->sol` };
+  return { quotes: [q1, q2], profit, engine: `sol->${buyDex}->${sellDex}->sol` };
 }
 
 // opp: { token_addr, dexA, dexB, priceA, priceB }

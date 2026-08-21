@@ -51,7 +51,7 @@ export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
     userPublicKey: userPubkey,
     wrapAndUnwrapSol: false,
     dynamicComputeUnitLimit: true,
-    useSharedAccounts: true,
+    useSharedAccounts: false,
     prioritizationFeeLamports: 0, // FEE OPT: priority fee 0
   });
   if (r.error) {
