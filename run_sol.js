@@ -6,6 +6,7 @@ import { WATCH_TOKENS, nextRpcUrl, SOL } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouter } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
+import { scanAll, validateWithJupiter } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
@@ -18,16 +19,14 @@ const LOOP_MS = parseInt(process.env.LOOP_MS || '12000');
 const MIN_WALLET_SOL = 0.02; // minimal SOL di wallet biar gak kehabisan fee
 
 async function findSolOpp() {
-  for (const tok of Object.keys(WATCH_TOKENS)) {
-    try {
-      const d = await pairsByToken(tok);
-      if (!d?.pairs) continue;
-      const opps = findMispricing(d.pairs, MIN_PROFIT_PCT);
-      // Skip kalau token_addr == SOL (gak ada arbitrage SOL vs SOL)
-      const filtered = opps.filter(o => o.token_addr && o.token_addr !== SOL);
-      if (filtered.length) return { type: 'cross_dex', opp: filtered[0] };
-    } catch (_) {}
-  }
+  // Scan dari BANYAK sumber (DexScreener + on-chain Meteora/Orca/Raydium), lalu validasi Jupiter
+  try {
+    const cands = await scanAll(MIN_PROFIT_PCT);
+    for (const c of cands) {
+      const v = await validateWithJupiter(c, SOL_AMOUNT);
+      if (v && v.profitSol > 0) return { type: 'cross_dex', opp: v };
+    }
+  } catch (_) {}
   return null;
 }
 
@@ -46,8 +45,9 @@ async function safeExecute(rawBase64, profitSol, label) {
   const sim = await simulateTx(vtx);
   if (!sim.ok) {
     // 6024/6025 = slippage/stale quote -> caller bisa rebuild dari quote fresh
-    const isSlippage = /6024|6025|0x1788|0x1789/.test(sim.err || '');
-    if (isSlippage) return { retry: true, reason: sim.err };
+    // InvalidSeeds = ATA extract rusak (intermittent) -> rebuild juga bisa bener
+    const isRetryable = /6024|6025|0x1788|0x1789|InvalidSeeds|InvalidAccountData/.test(sim.err || '');
+    if (isRetryable) return { retry: true, reason: sim.err };
     log(`[SIM FAIL] ${label}: ${sim.err}`, 'err');
     if (sim.logs) console.log('  logs:', sim.logs.join(' | '));
     return { retry: false };

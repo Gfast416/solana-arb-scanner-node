@@ -28,18 +28,24 @@ async function buildQuotes(opp, solAmountLamports) {
   return { quotes: [q1, q2], profit, engine: `sol->${buyDex}->${sellDex}->sol` };
 }
 
-// opp: { token_addr, dexA, dexB, priceA, priceB }
+// opp: { token_addr, dexA, dexB, priceA, priceB, quotes?, profitSol? }
 export async function buildSolRouter(opp, payer, solAmountLamports = 1_000_000, tipLamports = 5000) {
  try {
   // Skip DEX yang sering gagal (pumpswap gak punya ATA standard -> InvalidSeeds)
-  const BAD = ['pumpswap', 'pumpfun', 'moonshot', 'raydium-cpmm']; // bisa tambah
+  const BAD = ['pumpswap', 'pumpfun', 'moonshot', 'raydium-cpmm'];
   if (BAD.includes((opp.dexA||'').toLowerCase()) || BAD.includes((opp.dexB||'').toLowerCase())) {
     return { ok: false, reason: 'skip non-standard dex (' + opp.dexA + '/' + opp.dexB + ')', profit_sol: 0 };
   }
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const built = await buildQuotes(opp, solAmountLamports);
+      // Kalau udah divalidasi Jupiter (ada quotes), pakai langsung. Else build ulang.
+      let built;
+      if (opp.quotes && opp.quotes.length === 2) {
+        built = { quotes: opp.quotes, profit: opp.profitSol, engine: opp.engine };
+      } else {
+        built = await buildQuotes(opp, solAmountLamports);
+      }
       if (!built) return { ok: false, reason: 'no SOL/USDC pool', profit_sol: 0 };
       if (built.profit <= 0) return { ok: false, reason: `no profit (${built.profit.toFixed(6)} SOL)`, profit_sol: built.profit };
       const conn = new Connection(nextRpcUrl(), 'confirmed');
