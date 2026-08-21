@@ -1,31 +1,56 @@
-// dex_pool.js — cross-dex atomic via Jupiter dexes[] filter (per-DEX beneran, terbukti)
-// buy@DEX_A, sell@DEX_B dalam 1 VersionedTransaction (atomic)
+// dex_pool.js — cross-dex atomic via RAW per-DEX swap (bypass Jupiter aggregate)
+// beli di DEX_A (raydium/orca SDK murni), jual di DEX_B, 1 VersionedTransaction
 import { Connection, Keypair, PublicKey, SystemProgram, VersionedTransaction, TransactionMessage } from '@solana/web3.js';
 import { USDC, JITO_TIP_ACCOUNT, nextRpcUrl } from './config.js';
-import { getQuote, buildAtomicTx } from './build_atomic_tx.js';
+import { raydiumSwapIx, orcaSwapIx } from './dex_swap.js';
 
+function dexEngine(dex) {
+  const d = (dex || '').toLowerCase();
+  if (d.includes('raydium')) return 'raydium';
+  if (d.includes('orca')) return 'orca';
+  return null; // unsupported -> caller fallback
+}
+
+// opp: { token_addr, dexA, dexB, priceA, priceB, pairA, pairB }
+// pairA/pairB = pool address (DexScreener pairAddress) untuk DEX masing-masing
 export async function buildCrossDexAtomic(opp, payer, amountInUsd = 1_000_000, tipLamports = 5000) {
   const tokenMint = opp.token_addr;
   if (!tokenMint) return { ok: false, reason: 'no token_addr' };
   const buyDex = opp.priceA < opp.priceB ? opp.dexA : opp.dexB;
   const sellDex = opp.priceA < opp.priceB ? opp.dexB : opp.dexA;
+  const buyPool = opp.priceA < opp.priceB ? opp.pairA : opp.pairB;
+  const sellPool = opp.priceA < opp.priceB ? opp.pairB : opp.pairA;
 
-  // Quote per-DEX via Jupiter dexes[] filter
-  const q1 = await getQuote(USDC, tokenMint, amountInUsd, 50, { dexes: [buyDex] });
-  if (!q1 || !q1.outAmount) return { ok: false, reason: `no quote1 @${buyDex}` };
-  const q2 = await getQuote(tokenMint, USDC, Math.floor(Number(q1.outAmount)), 50, { dexes: [sellDex] });
-  if (!q2 || !q2.outAmount) return { ok: false, reason: `no quote2 @${sellDex}` };
+  const eBuy = dexEngine(buyDex), eSell = dexEngine(sellDex);
+  if (!eBuy || !eSell) return { ok: false, reason: `unsupported dex pair: ${buyDex}/${sellDex}` };
 
-  const out2 = Number(q2.outAmount);
-  const profit = out2 - amountInUsd;
-  if (profit <= 0) return { ok: false, reason: `no profit (${profit/1e6} USD)`, profit_usd: profit/1e6 };
+  // Leg 1: USDC -> TOKEN @ buyDex
+  const leg1 = eBuy === 'raydium'
+    ? await raydiumSwapIx(payer, buyPool, USDC, amountInUsd)
+    : await orcaSwapIx(payer, buyPool, USDC, amountInUsd, USDC === 'So11111111111111111111111111111111111111112' ? false : true);
+  // Leg 2: TOKEN -> USDC @ sellDex (pakai output leg1)
+  const leg2 = eSell === 'raydium'
+    ? await raydiumSwapIx(payer, sellPool, tokenMint, leg1.outAmount)
+    : await orcaSwapIx(payer, sellPool, tokenMint, leg1.outAmount, tokenMint === 'So11111111111111111111111111111111111111112' ? true : false);
 
-  // 1 atomic tx (2 swaps + tip), fee=0
+  const outUsdc = BigInt(leg2.outAmount);
+  const profit = Number(outUsdc - BigInt(amountInUsd));
+  if (profit <= 0) return { ok: false, reason: `no profit (${profit / 1e6} USD)`, profit_usd: profit / 1e6 };
+
+  // Gabungin SEMUA ix (ATA + swap A + swap B) + Jito tip = 1 atomic tx
+  const ixs = [...leg1.ixs, ...leg2.ixs, SystemProgram.transfer({
+    fromPubkey: payer.publicKey, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports,
+  })];
+
   const rpcUrl = nextRpcUrl();
   const conn = new Connection(rpcUrl, 'confirmed');
-  const vtx = await buildAtomicTx([q1, q2], payer, conn, tipLamports);
+  const { blockhash } = await conn.getLatestBlockhash();
+  const msg = new TransactionMessage({
+    payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs,
+  }).compileToV0Message([]);
+  const vtx = new VersionedTransaction(msg);
   vtx.sign([payer]);
   const raw = Buffer.from(vtx.serialize()).toString('base64');
 
-  return { ok: true, raw, buyDex, sellDex, profit_usd: profit/1e6, engine: 'jupiter-dexes' };
+  return { ok: true, raw, buyDex, sellDex, profit_usd: profit / 1e6, engine: `${eBuy}-${eSell}-raw` };
 }
