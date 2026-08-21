@@ -45,19 +45,22 @@ async function safeExecute(rawBase64, profitSol, label) {
   const vtx = VersionedTransaction.deserialize(Buffer.from(rawBase64, 'base64'));
   const sim = await simulateTx(vtx);
   if (!sim.ok) {
+    // 6024/6025 = slippage/stale quote -> caller bisa rebuild dari quote fresh
+    const isSlippage = /6024|6025|0x1788|0x1789/.test(sim.err || '');
+    if (isSlippage) return { retry: true, reason: sim.err };
     log(`[SIM FAIL] ${label}: ${sim.err}`, 'err');
     if (sim.logs) console.log('  logs:', sim.logs.join(' | '));
-    return;
+    return { retry: false };
   }
   log(`[SIM OK] ${label} units=${sim.units} profit~${profitSol?.toFixed(6)} SOL`, 'ok');
 
-  if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return; }
+  if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
   // 2. Profit guard — persentase dari modal (bukan fixed), biar test kecil gak false-skip
   const MIN_NET = Math.max((TIP + 2_000_000) / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
   if (profitSol <= MIN_NET) {
     log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
-    return;
+    return { retry: false };
   }
 
   // 3. Submit + confirm via bundle status polling
@@ -70,6 +73,7 @@ async function safeExecute(rawBase64, profitSol, label) {
   } else {
     log(`[SUBMIT ERR] ${JSON.stringify(res).slice(0, 120)}`, 'err');
   }
+  return { retry: false };
 }
 
 // Poll getBundleStatuses sampai landed/confirmed/rejected
@@ -108,14 +112,20 @@ async function loop() {
         break;
       }
 
-      // 1) Cross-dex
+      // 1) Cross-dex — rebuild sampai 3x kalau kena slippage (quote stale)
       const found = await findSolOpp();
       if (found) {
         const o = found.opp;
         log(`OPP cross_dex ${o.token} ${o.pct}% ${o.route}`);
-        const r = await buildSolRouter(o, payer, SOL_AMOUNT, TIP);
-        if (!r.ok) { log(`[SKIP] ${r.reason}`, 'err'); }
-        else { await safeExecute(r.raw, r.profit_sol, r.engine); }
+        let executed = false;
+        for (let attempt = 0; attempt < 3 && !executed; attempt++) {
+          if (attempt > 0) log(`  retry build (slippage) attempt ${attempt+1}/3...`);
+          const r = await buildSolRouter(o, payer, SOL_AMOUNT, TIP);
+          if (!r.ok) { log(`[SKIP] ${r.reason}`, 'err'); break; }
+          const res = await safeExecute(r.raw, r.profit_sol, r.engine);
+          if (res && res.retry) { await sleep(800); continue; } // quote stale -> rebuild fresh
+          executed = true;
+        }
       } else {
         // 2) Circular
         const circ = await findCircular(SOL_AMOUNT);
