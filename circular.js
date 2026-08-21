@@ -38,32 +38,19 @@ export async function findCircular(solAmount = 10_000_000) {
   return best;
 }
 
-// Build 1 atomic tx dari loop (pakai Jupiter swap-instructions per leg)
+// Build 1 atomic tx dari loop (pakai Jupiter quotes + buildAtomicTx V0+ALT, proven reliable)
 export async function buildCircularTx(loop, payer, tipLamports = 5000, retries = 3) {
   const { path, quotes } = loop;
-  const { jupiterSwapIx } = await import('./dex_swap.js');
+  const { buildAtomicTx } = await import('./build_atomic_tx.js');
   let lastErr;
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const ixs = [];
-      for (let i = 0; i < path.length - 1; i++) {
-        const amt = Number(quotes[i].outAmount || quotes[i].inAmount);
-        const leg = await jupiterSwapIx(payer, path[i], path[i+1], amt, null);
-        ixs.push(...leg.ixs);
-      }
-      ixs.push(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports }));
+      const { Connection } = await import('@solana/web3.js');
       const conn = new Connection(nextRpcUrl(), 'confirmed');
-      const { blockhash } = await conn.getLatestBlockhash();
-      const clean = ixs.filter(ix => {
-        try { if (!ix || !ix.programId) return false; ix.keys.forEach(k => new PublicKey(k.pubkey)); return true; }
-        catch (e) { return false; }
-      });
-      const msg = new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: clean }).compileToLegacyMessage();
-      const vtx = new VersionedTransaction(msg);
-      vtx.sign([payer]);
+      const vtx = await buildAtomicTx(quotes, payer, conn, tipLamports);
       const raw = Buffer.from(vtx.serialize()).toString('base64');
       return { ok: true, raw, profit_sol: loop.profit, path: loop.path.map(p => p.slice(0, 4)) };
-    } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 300)); }
+    } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 400)); }
   }
   throw new Error('buildCircularTx failed: ' + lastErr?.message);
 }

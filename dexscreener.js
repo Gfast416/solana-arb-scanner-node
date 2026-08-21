@@ -25,13 +25,17 @@ function isUsdcPair(p) {
   return (b === u || q === u);
 }
 
+// DEX yang bisa di-execute via Jupiter dgn ATA standard (pumpswap sering gagal)
+const ALLOWED_DEX = ['raydium', 'orca', 'meteora', 'whirlpool', 'raydium-clmm', 'raydium-cpmm'];
+function isAllowedDex(d) { return ALLOWED_DEX.includes((d||'').toLowerCase()); }
+
 // Cari peluang misprice antar DEX untuk 1 token
 // Cap 50%: di atas itu biasanya price-feed error (decimal pool beda)
 export function findMispricing(pairs, thresholdPct = 3.0) {
   if (!pairs || !pairs.length) return [];
   const valid = pairs.filter(p => {
     const pr = parseFloat(p.priceUsd);
-    return p && p.dexId && !isNaN(pr) && pr > 0 && isUsdcPair(p);
+    return p && p.dexId && !isNaN(pr) && pr > 0 && isUsdcPair(p) && isAllowedDex(p.dexId);
   });
   const out = [];
   // hitung median price buat filter outlier (price kotor dari pool decimal beda)
@@ -46,10 +50,10 @@ export function findMispricing(pairs, thresholdPct = 3.0) {
       // FILTER 2: outlier — 1 price >10x median atau <0.1x median = price kotor
       if (median > 0 && (pa > median * 10 || pa < median * 0.1)) continue;
       if (median > 0 && (pb > median * 10 || pb < median * 0.1)) continue;
-      // FILTER 3: likuiditas minimal $100 biar gak false positive (USD2 dll likuiditas kecil)
+      // FILTER 3: likuiditas minimal $5000 biar gak false positive (USD2 dll likuiditas kecil)
       const liqA = Number(a.liquidity?.usd || 0);
       const liqB = Number(b.liquidity?.usd || 0);
-      if (liqA < 100 || liqB < 100) continue;
+      if (liqA < 5000 || liqB < 5000) continue;
       const diff = Math.abs(pa - pb) / Math.min(pa, pb) * 100;
       if (diff >= thresholdPct && diff <= 50) {
         out.push({

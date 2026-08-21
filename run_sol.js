@@ -1,88 +1,139 @@
-// run_sol.js — SOL-centric live loop (auto-adapt: SOL->...->SOL)
-// Wallet cuma butuh SOL. Strategi adapts ke misprice:
-//   token X vs USDC misprice -> SOL->USDC->X(buy)->USDC(sell)->SOL
-// DRY_RUN=true (default): build + simulate, jangan submit. Set DRY_RUN=false di .env buat execute.
+// run_sol.js — SOL-centric live loop (cross-dex + circular, safer version)
 import 'dotenv/config';
-import { Keypair, Connection, VersionedTransaction } from '@solana/web3.js';
+import { Connection, VersionedTransaction } from '@solana/web3.js';
 import { loadKeypair, USE_JITO } from './executor.js';
-import { WATCH_TOKENS, nextRpcUrl, JITO_TIP_ACCOUNT } from './config.js';
+import { WATCH_TOKENS, nextRpcUrl, SOL } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouter } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
+import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
 const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.5');
 const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
-const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10_000_000'); // 0.01 SOL default test
+const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
+const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
+const JITO_URL = `https://${JITO_REGION}.bundle-router.jito.wtf/api/v1/bundles`;
+const LOOP_MS = parseInt(process.env.LOOP_MS || '12000');
+const MIN_WALLET_SOL = 0.02; // minimal SOL di wallet biar gak kehabisan fee
 
 async function findSolOpp() {
   for (const tok of Object.keys(WATCH_TOKENS)) {
-    const d = await pairsByToken(tok);
-    const opps = findMispricing(d.pairs, MIN_PROFIT_PCT);
-    if (opps.length) return { type: 'cross_dex', opp: opps[0] };
+    try {
+      const d = await pairsByToken(tok);
+      if (!d?.pairs) continue;
+      const opps = findMispricing(d.pairs, MIN_PROFIT_PCT);
+      // Skip kalau token_addr == SOL (gak ada arbitrage SOL vs SOL)
+      const filtered = opps.filter(o => o.token_addr && o.token_addr !== SOL);
+      if (filtered.length) return { type: 'cross_dex', opp: filtered[0] };
+    } catch (_) {}
   }
   return null;
 }
 
-async function executeSol(opp, payer) {
-  const r = await buildSolRouter(opp, payer, SOL_AMOUNT, TIP);
-  if (!r.ok) return console.log(`   [SKIP] ${r.reason}`);
-  console.log(`   [BUILD OK] engine: ${r.engine} | sim profit: ${r.profit_sol?.toFixed(6)} SOL`);
-  if (DRY_RUN) { console.log('   [DRY_RUN] not submitting (set DRY_RUN=false to execute)'); return; }
-  // GUARD: cuma submit kalau profit nyata > tip + buffer (jangan rugi tip doang)
-  const MIN_NET = (TIP + 2_000_000) / 1e9; // tip + 0.002 SOL buffer
-  if (r.profit_sol <= MIN_NET) { console.log(`   [SKIP] profit ${r.profit_sol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} SOL`); return; }
-  // submit via Jito
-  const fetchJITO = async (raw) => fetch(`https://frankfurt.bundle-router.jito.wtf/api/v1/bundles`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[raw]] }),
-  }).then(r => r.json());
-  const res = await fetchJITO(r.raw);
-  console.log(`   [SUBMITTED] bundle ${res?.result || JSON.stringify(res)?.slice(0,60)}`);
+async function submitBundle(rawBase64) {
+  const res = await fetch(JITO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[rawBase64]] }),
+  });
+  return res.json();
 }
 
-async function executeCircular(loop, payer) {
-  try {
-    const tx = await buildCircularTx(loop, payer, TIP);
-    console.log(`   [BUILD OK] circular ${loop.path.join('->')} | profit: ${loop.profit.toFixed(6)} SOL`);
-    if (DRY_RUN) { console.log('   [DRY_RUN] not submitting'); return; }
-    const MIN_NET = (TIP + 2_000_000) / 1e9;
-    if (loop.profit <= MIN_NET) { console.log(`   [SKIP] profit ${loop.profit.toFixed(6)} <= min net`); return; }
-    const fetchJITO = async (raw) => fetch(`https://frankfurt.bundle-router.jito.wtf/api/v1/bundles`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[raw]] }),
-    }).then(r => r.json());
-    const res = await fetchJITO(tx.raw);
-    console.log(`   [SUBMITTED] bundle ${res?.result || JSON.stringify(res)?.slice(0,60)}`);
-  } catch (e) { console.log(`   [SKIP] circular build: ${e.message?.slice(0,60)}`); }
+async function safeExecute(rawBase64, profitSol, label) {
+  // 1. Deserialize & simulate
+  const vtx = VersionedTransaction.deserialize(Buffer.from(rawBase64, 'base64'));
+  const sim = await simulateTx(vtx);
+  if (!sim.ok) {
+    log(`[SIM FAIL] ${label}: ${sim.err}`, 'err');
+    if (sim.logs) console.log('  logs:', sim.logs.join(' | '));
+    return;
+  }
+  log(`[SIM OK] ${label} units=${sim.units} profit~${profitSol?.toFixed(6)} SOL`, 'ok');
+
+  if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return; }
+
+  // 2. Profit guard
+  const MIN_NET = (TIP + 2_000_000) / 1e9;
+  if (profitSol <= MIN_NET) {
+    log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)}`, 'err');
+    return;
+  }
+
+  // 3. Submit + confirm via bundle status polling
+  const res = await submitBundle(rawBase64);
+  if (res?.result) {
+    log(`[SUBMITTED] bundle ${res.result}`, 'ok');
+    // Polling status (terkirim != sukses)
+    const status = await pollBundleStatus(res.result);
+    log(`[BUNDLE STATUS] ${status}`, 'info');
+  } else {
+    log(`[SUBMIT ERR] ${JSON.stringify(res).slice(0, 120)}`, 'err');
+  }
+}
+
+// Poll getBundleStatuses sampai landed/confirmed/rejected
+async function pollBundleStatus(bundleId, maxAttempts = 30) {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await fetch(JITO_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBundleStatuses', params: [[bundleId]] }),
+      });
+      const j = await r.json();
+      const st = j?.result?.value?.[0]?.confirmationStatus;
+      if (st && (st === 'confirmed' || st === 'finalized' || st === 'landed')) return st;
+      if (st === 'rejected' || st === 'failed') return st;
+    } catch (_) {}
+    await sleep(2000);
+  }
+  return 'timeout';
 }
 
 async function loop() {
   console.log('='.repeat(60));
-  console.log(' SOL-CENTRIC ARB EXECUTOR (cross-dex + circular, auto-adapt)');
+  console.log(' SOL-CENTRIC ARB (cross-dex + circular) — safer version');
   console.log('='.repeat(60));
-  console.log(` DRY_RUN: ${DRY_RUN} | MIN_PROFIT: ${MIN_PROFIT_PCT}% | SOL/test: ${SOL_AMOUNT/1e9}`);
+  console.log(` DRY_RUN=${DRY_RUN} | MIN_PROFIT=${MIN_PROFIT_PCT}% | SOL/test=${SOL_AMOUNT / 1e9}`);
+  console.log(` JITO=${JITO_REGION} | LOOP=${LOOP_MS}ms`);
   const payer = loadKeypair(process.env.WALLET_PRIVATE_KEY);
   console.log(` WALLET: ${payer.publicKey.toBase58()}`);
+
   while (true) {
     try {
-      // 1) cross-dex
-      const opp = await findSolOpp();
-      if (opp) {
-        console.log(`\n[${new Date().toISOString()}] OPP cross_dex ${opp.opp.token} ${opp.opp.pct}%  ${opp.opp.route}`);
-        await executeSol(opp.opp, payer);
+      // Cek balance dulu
+      const bal = await getSolBalance(payer.publicKey.toBase58());
+      if (bal / 1e9 < MIN_WALLET_SOL) {
+        log(`Wallet SOL terlalu rendah (${(bal / 1e9).toFixed(4)}). Stop.`, 'err');
+        break;
+      }
+
+      // 1) Cross-dex
+      const found = await findSolOpp();
+      if (found) {
+        const o = found.opp;
+        log(`OPP cross_dex ${o.token} ${o.pct}% ${o.route}`);
+        const r = await buildSolRouter(o, payer, SOL_AMOUNT, TIP);
+        if (!r.ok) { log(`[SKIP] ${r.reason}`, 'err'); }
+        else { await safeExecute(r.raw, r.profit_sol, r.engine); }
       } else {
-        // 2) circular multi-hop
-        const loop0 = await findCircular(SOL_AMOUNT);
-        if (loop0) {
-          console.log(`\n[${new Date().toISOString()}] OPP circular ${loop0.path.join('->')}  +${loop0.profit.toFixed(6)} SOL`);
-          await executeCircular(loop0, payer);
+        // 2) Circular
+        const circ = await findCircular(SOL_AMOUNT);
+        if (circ) {
+          log(`OPP circular ${circ.path.map(p => p.slice(0, 4)).join('→')} +${circ.profit.toFixed(6)} SOL`);
+          try {
+            const tx = await buildCircularTx(circ, payer, TIP);
+            if (tx.ok) await safeExecute(tx.raw, circ.profit, 'circular');
+          } catch (e) { log(`circular build fail: ${e.message?.slice(0, 80)}`, 'err'); }
         } else {
-          console.log(`[${new Date().toISOString()}] no opp, waiting...`);
+          log('no opp, waiting...');
         }
       }
-    } catch (e) { console.log('   loop err:', String(e).slice(0, 100)); }
-    await new Promise(r => setTimeout(r, 15000));
+    } catch (e) {
+      log(`loop err: ${String(e).slice(0, 120)}`, 'err');
+    }
+    await sleep(LOOP_MS);
   }
 }
+
 loop();

@@ -1,4 +1,14 @@
 node_modules/
-
 .env
+.env.local
 *.log
+.DS_Store
+dist/
+coverage/
+*.pem
+*.key
+debug-*.json
+_tmp/
+.vscode/
+.idea/
+_*.mjs

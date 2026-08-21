@@ -1,12 +1,18 @@
 {
   "name": "solana-arb-scanner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Solana arbitrage scanner + 1-tx atomic executor (Jito). Node.js.",
   "type": "module",
   "main": "executor.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "node run.js",
-    "dry": "node executor.js"
+    "start": "node run_sol.js",
+    "dry": "DRY_RUN=true node run_sol.js",
+    "executor": "node executor.js",
+    "circular": "node -e \"import('./circular.js').then(m => m.findCircular().then(console.log))\"",
+    "lint": "echo 'no linter yet'"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -15,6 +21,7 @@
     "@raydium-io/raydium-sdk-v2": "^0.2.61-alpha",
     "@solana/spl-token": "^0.4.8",
     "@solana/web3.js": "^1.95.0",
+    "bn.js": "^5.2.1",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
     "rpc-websockets": "^7.5.0"

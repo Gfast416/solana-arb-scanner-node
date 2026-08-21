@@ -4,6 +4,8 @@ import { Connection, Keypair, PublicKey, TransactionInstruction } from '@solana/
 import { Raydium, CurveCalculator, FeeOn, TxVersion, makeSwapCpmmBaseInInstruction, getPdaObservationId } from '@raydium-io/raydium-sdk-v2';
 import BN from 'bn.js';
 import { getAssociatedTokenAddressSync, createAssociatedTokenAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { createAtaIdempotent } from './utils.js';
+import { JUP_HEADERS } from './config.js';
 import { getQuote } from './build_atomic_tx.js';
 import { nextRpcUrl } from './config.js';
 import meta from '@meteora-ag/dlmm-sdk';
@@ -121,12 +123,13 @@ export async function raydiumSwapIx(payer, poolId, inputMint, amount, slippage =
     observationId,
     inputAmount, swapResult.outputAmount
   );
-  // ATA setup (aman ditambah; kalau sudah ada on-chain, chain akan skip/no-op)
-  const ixs = [
-    createAssociatedTokenAccountInstruction(payer.publicKey, ataA, payer.publicKey, mintA),
-    createAssociatedTokenAccountInstruction(payer.publicKey, ataB, payer.publicKey, mintB),
-    swapIx,
-  ];
+  // ATA setup (idempotent — aman kalau sudah ada; null = skip WSOL)
+  const ixs = [];
+  const ataAi = createAtaIdempotent(payer, mintA);
+  const ataBi = createAtaIdempotent(payer, mintB);
+  if (ataAi) ixs.push(ataAi);
+  if (ataBi) ixs.push(ataBi);
+  ixs.push(swapIx);
   return { ixs, outAmount: swapResult.outputAmount.toString() };
 }
 
@@ -163,42 +166,72 @@ export async function orcaSwapIx(payer, whirlpoolAddr, inputMint, amount, aToB) 
   return { ixs, outAmount: quote.estimatedAmountOut.toString() };
 }
 
-// -------- JUPITER (dexes[] filter fallback, format baru: instructions terpisah) --------
+// -------- JUPITER (dexes[] filter fallback, format swapTransaction base64) --------
 export async function jupiterSwapIx(payer, inputMint, outputMint, amount, dexes = null) {
   let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const q = await getQuote(inputMint, outputMint, amount, 50, dexes ? { dexes } : {});
       if (!q || !q.outAmount) throw new Error('no jupiter quote');
-      const r = await fetch('https://api.jup.ag/swap/v1/swap-instructions', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quoteResponse: q, userPublicKey: payer.publicKey.toBase58(), wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, useSharedAccounts: true, prioritizationFeeLamports: 0 }),
+      const r = await fetch('https://api.jup.ag/swap/v1/swap', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36', ...JUP_HEADERS },
+        body: JSON.stringify({
+          quoteResponse: q,
+          userPublicKey: payer.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: 0,
+        }),
       }).then(res => res.json());
-      if (r.error) throw new Error('jupiter swap err: ' + r.error);
+      if (r.error && typeof r.error === 'string' && r.error.includes('rate')) { await new Promise(r => setTimeout(r, 2000)); throw new Error('rate limited'); }
+      if (r.error) throw new Error('jupiter swap err: ' + JSON.stringify(r.error).slice(0, 60));
+      // Prefer swapTransaction (base64 tx), fallback to swap-instructions
+      if (r.swapTransaction) {
+        const { VersionedTransaction, TransactionInstruction, PublicKey } = await import('@solana/web3.js');
+        const tx = VersionedTransaction.deserialize(Buffer.from(r.swapTransaction, 'base64'));
+        const msg = tx.message;
+        const ixs = [];
+        const altKeys = [];
+        // kumpulkan ALT keys dari swapTransaction asli
+        for (const lk of (msg.addressTableLookups || [])) altKeys.push(lk.accountKey);
+        for (const ix of msg.compiledInstructions) {
+          const prog = msg.staticAccountKeys[ix.programIdIndex];
+          const keys = ix.accountKeyIndexes.map(idx => {
+            let pub;
+            if (idx < msg.staticAccountKeys.length) pub = msg.staticAccountKeys[idx];
+            else {
+              const altIdx = idx - msg.staticAccountKeys.length;
+              const lk = msg.addressTableLookups[0];
+              const st = lk ? (msg.accountKeysFromLookups?.writable?.[altIdx] || msg.accountKeysFromLookups?.readonly?.[altIdx]) : null;
+              pub = st || msg.staticAccountKeys[msg.staticAccountKeys.length - 1];
+            }
+            return { pubkey: pub, isSigner: false, isWritable: true };
+          });
+          ixs.push({ programId: prog, keys, data: Buffer.from(ix.data) });
+        }
+        const realIxs = ixs.map(ix => new TransactionInstruction({
+          programId: new PublicKey(ix.programId),
+          keys: ix.keys.map(k => ({ pubkey: new PublicKey(k.pubkey), isSigner: false, isWritable: k.isWritable })),
+          data: Buffer.from(ix.data),
+        }));
+        return { ixs: realIxs, altKeys, outAmount: q.outAmount };
+      }
+      // fallback: swap-instructions (legacy format)
       const { TransactionInstruction, PublicKey } = await import('@solana/web3.js');
-      const ixs = [];
+      const ixs2 = [];
       const _ins = (ins) => {
         if (!ins || !ins.programId || typeof ins.programId !== 'string') return null;
-        if (ins.accounts && !Array.isArray(ins.accounts)) return null;
         let data = Buffer.alloc(0);
-        try { if (typeof ins.data === 'string' && ins.data.length) data = Buffer.from(ins.data, 'base64'); } catch (e) { return null; }
-        try {
-          return new TransactionInstruction({
-            programId: new PublicKey(ins.programId),
-            keys: (ins.accounts || []).filter(a => a && a.pubkey).map(a => ({ pubkey: new PublicKey(typeof a.pubkey === 'string' ? a.pubkey : a.pubkey.toBase58()), isSigner: !!a.isSigner, isWritable: !!a.isWritable })),
-            data,
-          });
-        } catch (e) { return null; }
+        try { if (typeof ins.data === 'string' && ins.data.length) { if (!/^[A-Za-z0-9+/]*={0,2}$/.test(ins.data) || ins.data.length % 4 !== 0) return null; data = Buffer.from(ins.data, 'base64'); } } catch (e) { return null; }
+        try { return new TransactionInstruction({ programId: new PublicKey(ins.programId), keys: (ins.accounts || []).filter(a => a && a.pubkey).map(a => ({ pubkey: new PublicKey(typeof a.pubkey === 'string' ? a.pubkey : a.pubkey.toBase58()), isSigner: !!a.isSigner, isWritable: !!a.isWritable })), data }); } catch (e) { return null; }
       };
-      for (const ins of (r.computeBudgetInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
-      for (const ins of (r.setupInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
-      const swapIx = _ins(r.swapInstruction);
-      if (!swapIx) throw new Error('jupiter swapInstruction invalid');
-      ixs.push(swapIx);
-      if (r.cleanupInstruction) { const ci = _ins(r.cleanupInstruction); if (ci) ixs.push(ci); }
-      for (const ins of (r.otherInstructions || [])) { const ix = _ins(ins); if (ix) ixs.push(ix); }
-      return { ixs, outAmount: q.outAmount };
-    } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 400)); }
+      for (const ins of (r.computeBudgetInstructions || [])) { const ix = _ins(ins); if (ix) ixs2.push(ix); }
+      for (const ins of (r.setupInstructions || [])) { const ix = _ins(ins); if (ix) ixs2.push(ix); }
+      const swapIx = _ins(r.swapInstruction); if (!swapIx) throw new Error('jupiter swapInstruction invalid'); ixs2.push(swapIx);
+      if (r.cleanupInstruction) { const ci = _ins(r.cleanupInstruction); if (ci) ixs2.push(ci); }
+      for (const ins of (r.otherInstructions || [])) { const ix = _ins(ins); if (ix) ixs2.push(ix); }
+      return { ixs: ixs2, outAmount: q.outAmount };
+    } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 1500 * (attempt + 1))); }
   }
   throw new Error(lastErr?.message || 'jupiterSwapIx failed');
 }
