@@ -8,9 +8,19 @@ import { getQuote } from './build_atomic_tx.js';
 import { nextRpcUrl } from './config.js';
 import meta from '@meteora-ag/dlmm-sdk';
 import { AnchorProvider, Program } from '@coral-xyz/anchor';
-import { BN as ABN } from '@coral-xyz/anchor';
 import { readFileSync } from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+
+// Vendored @coral-xyz/anchor@0.29.0 — Meteora DLMM needs this exact version,
+// while Orca Whirlpools SDK needs anchor 0.32 (top-level). Loaded separately to avoid conflict.
+const _anchor29Path = fileURLToPath(new URL('./vendor/anchor29/dist/cjs/index.js', import.meta.url));
+const _require29 = createRequire(_anchor29Path);
+const anchor29 = _require29(_anchor29Path);
+const ABN = anchor29.BN;
+const Prog29 = anchor29.Program;
+const AP29 = anchor29.AnchorProvider;
 
 // ---- Patched meteora swapQuote (normalize BN args) ----
 const _origSwapQuote = meta.LBCLMM.prototype.swapQuote;
@@ -26,12 +36,13 @@ async function getMeteoraProgram() {
   const conn = new Connection(nextRpcUrl(), 'confirmed');
   const dummy = Keypair.generate();
   const wallet = { publicKey: dummy.publicKey, signTransaction: async t => t, signAllTransactions: async t => t };
-  const provider = new AnchorProvider(conn, wallet, { commitment: 'confirmed' });
-  _meteoraProgram = new Program(METEORA_IDL, meta.LBCLMM_PROGRAM_IDS['mainnet-beta'], provider);
+  const provider = new AP29(conn, wallet, { commitment: 'confirmed' });
+  _meteoraProgram = new Prog29(METEORA_IDL, meta.LBCLMM_PROGRAM_IDS['mainnet-beta'], provider);
   return _meteoraProgram;
 }
 
 // -------- METEORA (raw DLMM, 100% bypass Jupiter) --------
+// Meteora butuh anchor 0.29 (bundled di ./vendor/anchor29) biar gak konflik dgn orca (0.32)
 export async function meteoraSwapIx(payer, poolAddrStr, inputMint, amount, aToB) {
   const program = await getMeteoraProgram();
   const conn = program.provider.connection;
