@@ -58,6 +58,7 @@ export async function meteoraSwapIx(payer, poolAddrStr, inputMint, amount, aToB)
 
 // -------- RAYDIUM (raw, bypass ATA-check) --------
 let _raydium = null;
+const RAYDIUM_CPMM_PROGRAM = 'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C';
 async function getRaydium(payer) {
   if (_raydium) return _raydium;
   const conn = new Connection(nextRpcUrl(), 'confirmed');
@@ -70,6 +71,10 @@ export async function raydiumSwapIx(payer, poolId, inputMint, amount, slippage =
   const raydium = await getRaydium(payer);
   const data = await raydium.api.fetchPoolById({ ids: poolId });
   const poolInfo = data[0];
+  if (!poolInfo) throw new Error('pool not found');
+  if (poolInfo.programId !== RAYDIUM_CPMM_PROGRAM) {
+    throw new Error(`not CPMM pool (${poolInfo.programId?.slice(0,8)})`);
+  }
   const rpcData = await raydium.cpmm.getRpcPoolInfo(poolInfo.id, true);
   const baseIn = inputMint === poolInfo.mintA.address;
   const inputAmount = new BN(amount.toString());

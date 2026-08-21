@@ -28,7 +28,10 @@ export async function buildCrossDexAtomic(opp, payer, amountInUsd = 1_000_000, t
   // Leg 1: USDC -> TOKEN @ buyDex
   let leg1;
   try {
-    if (eBuy === 'raydium') leg1 = await raydiumSwapIx(payer, buyPool, USDC, amountInUsd);
+    if (eBuy === 'raydium') {
+      try { leg1 = await raydiumSwapIx(payer, buyPool, USDC, amountInUsd); }
+      catch (e) { leg1 = await jupiterSwapIx(payer, USDC, tokenMint, amountInUsd, ['raydium']); }
+    }
     else if (eBuy === 'orca') leg1 = await orcaSwapIx(payer, buyPool, USDC, amountInUsd, USDC === 'So11111111111111111111111111111111111111112' ? false : true);
     else if (eBuy === 'meteora') leg1 = await meteoraSwapIx(payer, buyPool, USDC, amountInUsd, true);
     else leg1 = await jupiterSwapIx(payer, USDC, tokenMint, amountInUsd, ['meteora']);
@@ -37,7 +40,10 @@ export async function buildCrossDexAtomic(opp, payer, amountInUsd = 1_000_000, t
   // Leg 2: TOKEN -> USDC @ sellDex (pakai output leg1)
   let leg2;
   try {
-    if (eSell === 'raydium') leg2 = await raydiumSwapIx(payer, sellPool, tokenMint, leg1.outAmount);
+    if (eSell === 'raydium') {
+      try { leg2 = await raydiumSwapIx(payer, sellPool, tokenMint, leg1.outAmount); }
+      catch (e) { leg2 = await jupiterSwapIx(payer, tokenMint, USDC, leg1.outAmount, ['raydium']); }
+    }
     else if (eSell === 'orca') leg2 = await orcaSwapIx(payer, sellPool, tokenMint, leg1.outAmount, tokenMint === 'So11111111111111111111111111111111111111112' ? true : false);
     else if (eSell === 'meteora') leg2 = await meteoraSwapIx(payer, sellPool, tokenMint, leg1.outAmount, false);
     else leg2 = await jupiterSwapIx(payer, tokenMint, USDC, leg1.outAmount, ['meteora']);
