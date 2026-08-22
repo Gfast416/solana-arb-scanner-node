@@ -10,7 +10,7 @@ import { scanAll, validateWithJupiter } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
-const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.5');
+const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.1');
 const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
 const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
 const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
@@ -56,8 +56,9 @@ async function safeExecute(rawBase64, profitSol, label) {
 
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
-  // 2. Profit guard — persentase dari modal (bukan fixed), biar test kecil gak false-skip
-  const MIN_NET = Math.max((TIP + 2_000_000) / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
+  // 2. Profit guard — persentase dari modal (pure %), floor cuma tip + gas kecil
+  // TIP 5000 lamport (~0.000005 SOL) + gas ~0.0002 SOL = 0.000205 floor
+  const MIN_NET = Math.max((TIP + 200_000) / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
   if (profitSol <= MIN_NET) {
     log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
     return { retry: false };
