@@ -2,10 +2,11 @@
 // Sumber deteksi: DexScreener (primary, cepat) + Meteora/Orca/Raydium on-chain (bonus)
 // Gatekeeper: Jupiter quote (harga executable beneran -> profit nyata, gak false positive)
 import { Connection } from '@solana/web3.js';
-import { nextRpcUrl, SOL, WATCH_TOKEN_LIST, AGGRESSIVE_THRESHOLD } from './config.js';
+import { nextRpcUrl, SOL, AGGRESSIVE_THRESHOLD } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { getQuote } from './build_atomic_tx.js';
 import { resolveMeteora, resolveOrca, resolveRaydium } from './pool_resolver.js';
+import { fetchDynamicTokens } from './token_source.js';
 import { inc } from './metrics.js';
 
 const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora', whirlpool: 'orca' };
@@ -34,10 +35,12 @@ export async function validateOnChain(opp) {
   } catch { return true; }
 }
 
-// ---- Kandidat dari DexScreener (cepat, parallel semua token) ----
+// ---- Kandidat dari DexScreener (DYNAMIC: semua token trending/boosted/top-volume) ----
 async function scanDexScreener(minPct) {
   const out = [];
-  const tokens = WATCH_TOKEN_LIST;
+  // TOKEN DINAMIS: gak terbatas list statis, fetch dari DexScreener tiap scan
+  const tokens = await fetchDynamicTokens(parseInt(process.env.MAX_TOKENS || '150'));
+  if (!tokens.length) return out;
   await Promise.all(tokens.map(async ([mint, sym]) => {
     try {
       const d = await pairsByToken(mint);
