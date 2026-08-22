@@ -7,6 +7,7 @@ import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouterFast } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
 import { scanAll, validateOnChain } from './multi_scanner.js';
+import { scanOnChain } from './onchain_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 import * as risk from './risk.js';
 import * as metrics from './metrics.js';
@@ -29,6 +30,10 @@ const MIN_WALLET_SOL = 0.02;
 
 async function findSolOpps() {
   try {
+    // PRIMARY: on-chain reserves (nyata, gak ghost spt DexScreener)
+    const onchain = await scanOnChain(MIN_PROFIT_PCT, parseInt(process.env.ONCHAIN_LIMIT || '30'));
+    if (onchain.length) return onchain.filter(c => !risk.isBlacklisted(c.token_addr)).slice(0, MAX_CANDIDATES);
+    // FALLBACK: DexScreener API (kalau on-chain gagal)
     const cands = await scanAll(MIN_PROFIT_PCT);
     return cands.filter(c => !risk.isBlacklisted(c.token_addr)).slice(0, MAX_CANDIDATES);
   } catch (_) { return []; }
@@ -147,9 +152,11 @@ async function pollBundleStatus(bundleId, maxAttempts = 30) {
 
 async function tryCrossDex(o, payer) {
   metrics.inc('scanned');
-  // On-chain double-check (kurangi DexScreener false positive)
-  const ok = await validateOnChain(o).catch(() => true); // kalau RPC error, tetep lanjut (Jupiter yg validasi)
-  if (!ok) { metrics.inc('falsePositive'); log(`[SKIP] onchain pool missing ${o.token} ${o.dexA}/${o.dexB}`, 'err'); return true; }
+  // On-chain double-check (kurangi DexScreener false positive) — skip kalau opp dari on-chain scanner
+  if (o.source !== 'onchain-raydium') {
+    const ok = await validateOnChain(o).catch(() => true);
+    if (!ok) { metrics.inc('falsePositive'); log(`[SKIP] onchain pool missing ${o.token} ${o.dexA}/${o.dexB}`, 'err'); return true; }
+  }
   let executed = false;
   for (let attempt = 0; attempt < 3 && !executed; attempt++) {
     if (attempt > 0) log(`  retry build (slippage) attempt ${attempt+1}/3...`);

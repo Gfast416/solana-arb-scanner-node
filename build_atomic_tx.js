@@ -54,12 +54,14 @@ export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
     prioritizationFeeLamports: 0,
   });
   if (r.error) {
-    if (attempt < 3) { await new Promise(res => setTimeout(res, 1500 * (attempt + 1))); return getSwapInstructionsRaw(quote, userPubkey, attempt + 1); }
+    // Print error ASLI biar kelihatan (bukan cuma "swap err")
+    if (attempt === 0) console.error('[JUP /swap error]', JSON.stringify(r.error).slice(0, 150));
+    if (attempt < 5) { await new Promise(res => setTimeout(res, 1200 * (attempt + 1))); return getSwapInstructionsRaw(quote, userPubkey, attempt + 1); }
     throw new Error('swap err: ' + JSON.stringify(r.error).slice(0, 80));
   }
   if (!r.swapTransaction) {
     const isTransient = r.code === 429 || (r.message && /rate|timeout|too many|try again/i.test(r.message));
-    if (attempt < 4 && isTransient) { await new Promise(res => setTimeout(res, 2000 * (attempt + 1))); return getSwapInstructionsRaw(quote, userPubkey, attempt + 1); }
+    if (attempt < 5 && isTransient) { await new Promise(res => setTimeout(res, 1500 * (attempt + 1))); return getSwapInstructionsRaw(quote, userPubkey, attempt + 1); }
     console.error('[getSwapInstructionsRaw] no swapTransaction. code=', r.code, 'msg=', r.message?.slice?.(0,120));
     throw new Error('no swapTransaction in jupiter response');
   }
