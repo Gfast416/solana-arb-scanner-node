@@ -2,7 +2,7 @@
 import {
   Connection, Keypair, PublicKey, TransactionInstruction,
   TransactionMessage, VersionedTransaction, SystemProgram,
-  Transaction, AddressLookupTableAccount,
+  Transaction, AddressLookupTableAccount, ComputeBudgetProgram,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { USDC, SOL, JITO_TIP_ACCOUNT, JUP_HEADERS, nextRpcUrl } from './config.js';
@@ -139,10 +139,20 @@ export async function buildAtomicTx(quotes, payer, connection, tipLamports = 500
     }
   }
 
-  // Jito tip
-  allIxs.push(SystemProgram.transfer({
-    fromPubkey: user, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports,
-  }));
+  // ComputeBudget: priority fee mikro (bikin cepat land, gas tetap rendah)
+  // unitPrice ~1000 microlamport/CU, limit ~200k CU -> ~0.000002 SOL total
+  const MICRO_PRIORITY = parseInt(process.env.MICRO_PRIORITY_MICRO || '1000');
+  allIxs.unshift(
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: MICRO_PRIORITY }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 250000 })
+  );
+
+  // Jito tip (cuma kalau USE_JITO=true, default skip biar gas rendah)
+  if ((process.env.USE_JITO || 'false') === 'true') {
+    allIxs.push(SystemProgram.transfer({
+      fromPubkey: user, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports,
+    }));
+  }
 
   const { blockhash } = await conn.getLatestBlockhash();
   const msg = new TransactionMessage({

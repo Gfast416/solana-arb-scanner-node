@@ -87,7 +87,7 @@ async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
   }
 
   let res;
-  const USE_JITO = (process.env.USE_JITO || 'true') === 'true';
+  const USE_JITO = (process.env.USE_JITO || 'false') === 'true';
   if (USE_JITO) {
     try {
       res = await submitBundle(rawBase64);
@@ -109,11 +109,16 @@ async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
       log(`[JITO FAIL] ${e.message?.slice(0, 50)} -> fallback RPC`, 'err');
     }
   }
-  // FALLBACK: submit langsung lewat RPC (skip preflight biar cepat)
+  // DEFAULT: submit langsung lewat RPC + micro priority fee (cepat land, gas rendah)
   try {
     const conn = new Connection(nextRpcUrl(), 'confirmed');
-    const sig = await conn.sendRawTransaction(Buffer.from(rawBase64, 'base64'), { skipPreflight: true, maxRetries: 2 });
-    log(`[RPC SUBMITTED] ${sig.slice(0, 16)}... (no Jito tip, priority 0)`, 'ok');
+    // skipPreflight=true biar gak nunggu, maxRetries=0 biar cepat (priority fee yg bikin land)
+    const sig = await conn.sendRawTransaction(Buffer.from(rawBase64, 'base64'), {
+      skipPreflight: true,
+      maxRetries: 0,
+      preflightCommitment: 'processed',
+    });
+    log(`[RPC SUBMITTED] ${sig.slice(0, 16)}... (micro priority, no Jito tip)`, 'ok');
     metrics.inc('submitted');
     risk.recordSuccess(profitSol);
     return { retry: false };
