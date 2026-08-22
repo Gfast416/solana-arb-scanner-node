@@ -1,12 +1,11 @@
-// build_atomic_tx.js — 1 tx atomic via Jupiter /swap (base64) -> extract + merge
+// build_atomic_tx.js — 1 tx atomic via Jupiter /swap (V0+ALT) -> extract robust + Jito tip
 import {
   Connection, Keypair, PublicKey, TransactionInstruction,
   TransactionMessage, VersionedTransaction, SystemProgram,
   Transaction, AddressLookupTableAccount,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { USDC, SOL, JITO_TIP_ACCOUNT, JUP_HEADERS } from './config.js';
-import { nextRpcUrl } from './config.js';
+import { USDC, SOL, JITO_TIP_ACCOUNT, JUP_HEADERS, nextRpcUrl } from './config.js';
 
 const JUP_QUOTE = 'https://api.jup.ag/swap/v1/quote';
 const JUP_SWAP = 'https://api.jup.ag/swap/v1/swap';
@@ -44,7 +43,7 @@ export async function getQuote(inputMint, outputMint, amount, slippageBps = 50, 
 }
 
 // Ambil instructions dari Jupiter /swap (base64 tx) tanpa sign
-// Pakai asLegacyTransaction:true biar gak ada ALT lookup (lebih robust)
+// V0+ALT (default) biar support >256 accounts
 export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
   const r = await _postJson(JUP_SWAP, {
     quoteResponse: quote,
@@ -52,7 +51,7 @@ export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
     wrapAndUnwrapSol: false,
     dynamicComputeUnitLimit: true,
     useSharedAccounts: false,
-    prioritizationFeeLamports: 0, // FEE OPT: priority fee 0
+    prioritizationFeeLamports: 0,
   });
   if (r.error) {
     if (attempt < 3) { await new Promise(res => setTimeout(res, 1500 * (attempt + 1))); return getSwapInstructionsRaw(quote, userPubkey, attempt + 1); }
@@ -67,8 +66,8 @@ export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
   return Buffer.from(r.swapTransaction, 'base64');
 }
 
-// Gabungin banyak swap jadi 1 atomic tx + Jito tip.
-// 2-pass: (1) deserialize semua leg + kumpulkan ALT, (2) fetch ALT lalu extract + merge.
+// Gabungin banyak swap jadi 1 atomic tx (V0+ALT) + Jito tip.
+// Pakai getAccountKeys(alts) utk resolve (cara web3.js resmi) -> robust, gak InvalidSeeds.
 export async function buildAtomicTx(quotes, payer, connection, tipLamports = 5000) {
   const rpcUrl = nextRpcUrl();
   const conn = connection || new Connection(rpcUrl, 'confirmed');
@@ -77,18 +76,21 @@ export async function buildAtomicTx(quotes, payer, connection, tipLamports = 500
   const altSet = new Set();
   const legMsgs = [];
 
-  // PASS 1: deserialize semua leg, kumpulkan ALT lookups
+  // PASS 1: deserialize semua leg, kumpulkan ALT
   for (const q of quotes) {
     const raw = await getSwapInstructionsRaw(q, user.toBase58());
     let msg;
     try {
       msg = VersionedTransaction.deserialize(raw).message;
     } catch {
-      // legacy tx (asLegacyTransaction:true) -> extract langsung, preserve signer/writable
       const tx = Transaction.from(raw);
       for (const ix of tx.instructions) {
         if (ix.programId.toBase58() === 'ComputeBudget111111111111111111111111111111') continue;
         const keys = ix.keys.map(k => ({ pubkey: k.pubkey, isSigner: k.isSigner, isWritable: k.isWritable }));
+        if (ix.programId.toBase58() === 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL') {
+          const WSOL = 'So11111111111111111111111111111111111111112';
+          if (keys[1]?.pubkey?.toBase58() === WSOL) continue;
+        }
         allIxs.push(new TransactionInstruction({ programId: ix.programId, keys, data: ix.data }));
       }
       continue;
@@ -97,54 +99,42 @@ export async function buildAtomicTx(quotes, payer, connection, tipLamports = 500
     legMsgs.push(msg);
   }
 
-  // Fetch ALT on-chain (sekali untuk semua), pakai key dari legMsgs biar match reference
-  const altByKey = {};
+  // Fetch ALT on-chain (sekali)
   const alts = [];
-  for (const msg of legMsgs) {
-    for (const lk of msg.addressTableLookups) {
-      const k = lk.accountKey.toBase58();
-      if (altByKey[k]) continue;
-      try {
-        const info = await conn.getAccountInfo(lk.accountKey);
-        if (info) {
-          const deser = AddressLookupTableAccount.deserialize(info.data);
-          const addrs = deser.addresses || [];
-          altByKey[k] = addrs;
-          alts.push(new AddressLookupTableAccount({ key: lk.accountKey, state: { addresses: addrs, authority: undefined, deactivationSlot: 0n, lastExtendedSlot: 0n, lastExtendedSlotStartIndex: 0 } }));
-        }
-      } catch { /* skip */ }
-    }
+  const altByKey = {};
+  for (const addr of altSet) {
+    try {
+      const info = await conn.getAccountInfo(new PublicKey(addr));
+      if (info) {
+        const deser = AddressLookupTableAccount.deserialize(info.data);
+        const addrs = deser.state?.addresses || deser.addresses || [];
+        altByKey[addr] = addrs;
+        alts.push(new AddressLookupTableAccount({ key: new PublicKey(addr), state: { addresses: addrs, authority: undefined, deactivationSlot: 0n, lastExtendedSlot: 0n, lastExtendedSlotStartIndex: 0 } }));
+      }
+    } catch { /* skip */ }
   }
 
-  // PASS 2: extract compiled instructions tiap leg, resolve ALT manual
+  // PASS 2: extract + resolve pakai getAccountKeys (resmi)
   for (const msg of legMsgs) {
-    const accountKeys = msg.staticAccountKeys; // static keys
+    let resolved;
+    try { resolved = msg.getAccountKeys(alts); }
+    catch { resolved = null; }
     for (const ci of msg.compiledInstructions) {
-      const programId = accountKeys[ci.programIdIndex];
+      const programId = msg.staticAccountKeys[ci.programIdIndex];
       if (programId.toBase58() === 'ComputeBudget111111111111111111111111111111') continue;
       const keys = [];
       let unresolved = false;
       for (const idx of ci.accountKeyIndexes) {
-        let pk;
-        if (idx < accountKeys.length) {
-          pk = accountKeys[idx];
-        } else {
-          const altIdx = idx - accountKeys.length;
-          let found = null;
-          for (const lk of msg.addressTableLookups) {
-            const wi = lk.writableIndexes || [];
-            const ri = lk.readonlyIndexes || [];
-            if (altIdx < wi.length) { found = altByKey[lk.accountKey.toBase58()]?.[wi[altIdx]]; break; }
-            const roIdx = altIdx - wi.length;
-            if (roIdx < ri.length) { found = altByKey[lk.accountKey.toBase58()]?.[ri[roIdx]]; break; }
-          }
-          pk = found;
-        }
+        let pk = resolved ? resolved.get(idx) : null;
+        if (!pk && idx < msg.staticAccountKeys.length) pk = msg.staticAccountKeys[idx];
         if (!pk) { unresolved = true; break; }
         keys.push({ pubkey: pk, isSigner: msg.isAccountSigner(idx), isWritable: msg.isAccountWritable(idx) });
       }
-      if (unresolved) continue;
-      if (!keys.length) continue;
+      if (unresolved || !keys.length) continue;
+      if (programId.toBase58() === 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL') {
+        const WSOL = 'So11111111111111111111111111111111111111112';
+        if (keys[1]?.pubkey?.toBase58() === WSOL) continue;
+      }
       allIxs.push(new TransactionInstruction({ programId, keys, data: ci.data || Buffer.alloc(0) }));
     }
   }
