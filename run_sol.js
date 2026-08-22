@@ -56,9 +56,8 @@ async function safeExecute(rawBase64, profitSol, label) {
 
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
-  // 2. Profit guard — persentase dari modal (pure %), floor cuma tip + gas kecil
-  // TIP 5000 lamport (~0.000005 SOL) + gas ~0.0002 SOL = 0.000205 floor
-  const MIN_NET = Math.max((TIP + 200_000) / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
+  // 2. Profit guard — persentase dari modal, floor cuma tip (biar opp kecil bisa execute)
+  const MIN_NET = Math.max(TIP / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
   if (profitSol <= MIN_NET) {
     log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
     return { retry: false };
