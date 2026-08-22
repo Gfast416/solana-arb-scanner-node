@@ -1,10 +1,11 @@
-// build_atomic_tx.js — 1 tx atomic via Jupiter /swap (V0+ALT) -> extract robust + Jito tip
+// build_atomic_tx.js — 1 tx atomic via Jupiter /swap (V0, ALT tolerant) -> merge + priority fee
+// ALT-tolerant: pakai getAccountKeys() default (Jupiter SOL<->JUP gak pakai ALT, ALT:0).
+// VERIFY: throw kalau gak ada swap instruction (biar gak submit tx kosong).
 import {
   Connection, Keypair, PublicKey, TransactionInstruction,
-  TransactionMessage, VersionedTransaction, SystemProgram,
-  Transaction, AddressLookupTableAccount, ComputeBudgetProgram,
+  TransactionMessage, VersionedTransaction, SystemProgram, Transaction,
+  ComputeBudgetProgram, AddressLookupTableAccount,
 } from '@solana/web3.js';
-import bs58 from 'bs58';
 import { USDC, SOL, JITO_TIP_ACCOUNT, JUP_HEADERS, nextRpcUrl } from './config.js';
 
 const JUP_QUOTE = 'https://api.jup.ag/swap/v1/quote';
@@ -42,8 +43,7 @@ export async function getQuote(inputMint, outputMint, amount, slippageBps = 50, 
   return q;
 }
 
-// Ambil instructions dari Jupiter /swap (base64 tx) tanpa sign
-// V0+ALT (default) biar support >256 accounts
+// Ambil instructions dari Jupiter /swap (V0, default — ALT handled by getAccountKeys)
 export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
   const r = await _postJson(JUP_SWAP, {
     quoteResponse: quote,
@@ -66,23 +66,21 @@ export async function getSwapInstructionsRaw(quote, userPubkey, attempt = 0) {
   return Buffer.from(r.swapTransaction, 'base64');
 }
 
-// Gabungin banyak swap jadi 1 atomic tx (V0+ALT) + Jito tip.
-// Pakai getAccountKeys(alts) utk resolve (cara web3.js resmi) -> robust, gak InvalidSeeds.
+// Gabungin banyak swap jadi 1 atomic tx (V0) + micro priority fee.
 export async function buildAtomicTx(quotes, payer, connection, tipLamports = 5000) {
   const rpcUrl = nextRpcUrl();
   const conn = connection || new Connection(rpcUrl, 'confirmed');
   const user = payer.publicKey;
   const allIxs = [];
-  const altSet = new Set();
   const legMsgs = [];
 
-  // PASS 1: deserialize semua leg, kumpulkan ALT
+  // PASS 1: deserialize semua leg + fetch ALT (resmi via getAddressLookupTable)
+  const altsResolved = [];
   for (const q of quotes) {
     const raw = await getSwapInstructionsRaw(q, user.toBase58());
     let msg;
-    try {
-      msg = VersionedTransaction.deserialize(raw).message;
-    } catch {
+    try { msg = VersionedTransaction.deserialize(raw).message; }
+    catch {
       const tx = Transaction.from(raw);
       for (const ix of tx.instructions) {
         if (ix.programId.toBase58() === 'ComputeBudget111111111111111111111111111111') continue;
@@ -95,30 +93,20 @@ export async function buildAtomicTx(quotes, payer, connection, tipLamports = 500
       }
       continue;
     }
-    for (const lk of msg.addressTableLookups) altSet.add(lk.accountKey.toBase58());
+    // Fetch ALT on-chain (resmi)
+    for (const lk of msg.addressTableLookups) {
+      try {
+        const acc = await conn.getAddressLookupTable(lk.accountKey, 'confirmed');
+        if (acc?.value) altsResolved.push(acc.value);
+      } catch { /* skip */ }
+    }
     legMsgs.push(msg);
   }
 
-  // Fetch ALT on-chain (sekali)
-  const alts = [];
-  const altByKey = {};
-  for (const addr of altSet) {
-    try {
-      const info = await conn.getAccountInfo(new PublicKey(addr));
-      if (info) {
-        const deser = AddressLookupTableAccount.deserialize(info.data);
-        const addrs = deser.state?.addresses || deser.addresses || [];
-        altByKey[addr] = addrs;
-        alts.push(new AddressLookupTableAccount({ key: new PublicKey(addr), state: { addresses: addrs, authority: undefined, deactivationSlot: 0n, lastExtendedSlot: 0n, lastExtendedSlotStartIndex: 0 } }));
-      }
-    } catch { /* skip */ }
-  }
-
-  // PASS 2: extract + resolve pakai getAccountKeys (resmi)
+  // PASS 2: extract pakai getAccountKeys dengan ALT yang di-fetch
   for (const msg of legMsgs) {
     let resolved;
-    try { resolved = msg.getAccountKeys(alts); }
-    catch { resolved = null; }
+    try { resolved = msg.getAccountKeys({ usable: altsResolved }); } catch { resolved = null; }
     for (const ci of msg.compiledInstructions) {
       const programId = msg.staticAccountKeys[ci.programIdIndex];
       if (programId.toBase58() === 'ComputeBudget111111111111111111111111111111') continue;
@@ -139,25 +127,24 @@ export async function buildAtomicTx(quotes, payer, connection, tipLamports = 500
     }
   }
 
-  // ComputeBudget: priority fee mikro (bikin cepat land, gas tetap rendah)
-  // unitPrice ~1000 microlamport/CU, limit ~200k CU -> ~0.000002 SOL total
+  // VERIFY: harus ada minimal 1 swap (bukan cuma compute budget)
+  const SKIP = ['ComputeBudget111111111111111111111111111111','11111111111111111111111111111111','TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA','ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'];
+  const hasSwap = allIxs.some(ix => !SKIP.includes(ix.programId.toBase58()));
+  if (!hasSwap) throw new Error('BUILD EMPTY: no swap instruction (ALT resolve failed?)');
+
+  // Micro priority fee (cepat land, gas rendah)
   const MICRO_PRIORITY = parseInt(process.env.MICRO_PRIORITY_MICRO || '1000');
   allIxs.unshift(
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: MICRO_PRIORITY }),
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 250000 })
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 })
   );
 
-  // Jito tip (cuma kalau USE_JITO=true, default skip biar gas rendah)
   if ((process.env.USE_JITO || 'false') === 'true') {
-    allIxs.push(SystemProgram.transfer({
-      fromPubkey: user, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports,
-    }));
+    allIxs.push(SystemProgram.transfer({ fromPubkey: user, toPubkey: new PublicKey(JITO_TIP_ACCOUNT), lamports: tipLamports }));
   }
 
   const { blockhash } = await conn.getLatestBlockhash();
-  const msg = new TransactionMessage({
-    payerKey: user, recentBlockhash: blockhash, instructions: allIxs,
-  }).compileToV0Message(alts);
+  const msg = new TransactionMessage({ payerKey: user, recentBlockhash: blockhash, instructions: allIxs }).compileToV0Message([]);
   const vtx = new VersionedTransaction(msg);
   vtx.sign([payer]);
   return vtx;

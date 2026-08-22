@@ -21,15 +21,31 @@ export async function buildSolRouterFast(opp, payer, solAmountLamports = 10_000_
     throw new Error('skip non-standard dex');
   }
   // 1x quote aja (forced dex) — ini yang bikin cepat
-  const q1 = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, buyDex ? { dexes: [buyDex] } : {});
-  if (!q1?.outAmount) throw new Error('no quote SOL->token @' + buyDex);
-  const q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), SLIP, sellDex ? { dexes: [sellDex] } : {});
-  if (!q2?.outAmount) throw new Error('no quote token->SOL @' + sellDex);
-  const profitSol = (Number(q2.outAmount) - solAmountLamports) / 1e9;
+  let q1, q2;
+  try {
+    q1 = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, buyDex ? { dexes: [buyDex] } : {});
+    if (!q1?.outAmount) throw new Error('no quote SOL->token @' + buyDex);
+    q2 = await getQuote(tokenMint, SOL, Number(q1.outAmount), SLIP, sellDex ? { dexes: [sellDex] } : {});
+    if (!q2?.outAmount) throw new Error('no quote token->SOL @' + sellDex);
+  } catch (e) { throw e; }
+
   const engine = `sol->${buyDex}->${sellDex}->sol`;
   const conn = new Connection(nextRpcUrl(), 'confirmed');
-  const vtx = await buildAtomicTx([q1, q2], payer, conn, tipLamports);
-  return { raw: Buffer.from(vtx.serialize()).toString('base64'), profitSol, engine };
+  try {
+    const vtx = await buildAtomicTx([q1, q2], payer, conn, tipLamports);
+    const profitSol = (Number(q2.outAmount) - solAmountLamports) / 1e9;
+    return { raw: Buffer.from(vtx.serialize()).toString('base64'), profitSol, engine };
+  } catch (e) {
+    // Kalau forced-dex gagal extract (ALT unresolved), fallback ke aggregate quote (gak dex filter)
+    if (/BUILD EMPTY|ALT/i.test(e.message || '')) {
+      const q1b = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, {});
+      const q2b = await getQuote(tokenMint, SOL, Number(q1b.outAmount), SLIP, {});
+      const vtx = await buildAtomicTx([q1b, q2b], payer, conn, tipLamports);
+      const profitSol = (Number(q2b.outAmount) - solAmountLamports) / 1e9;
+      return { raw: Buffer.from(vtx.serialize()).toString('base64'), profitSol, engine: `sol->aggregate->sol (fallback)` };
+    }
+    throw e;
+  }
 }
 
 // Backward-compat wrapper (buat circular/jitcaller kalau ada)
