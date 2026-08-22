@@ -6,14 +6,35 @@ import { nextRpcUrl, SOL, WATCH_TOKEN_LIST, AGGRESSIVE_THRESHOLD } from './confi
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { getQuote } from './build_atomic_tx.js';
 import { resolveMeteora, resolveOrca, resolveRaydium } from './pool_resolver.js';
+import { inc } from './metrics.js';
 
 const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora', whirlpool: 'orca' };
 function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
 export const DEX_LIST = ['meteora', 'orca', 'raydium'];
 
+// Double-check on-chain (OPT-IN via .env ONCHAIN_VALIDATE=true).
+// Default OFF: Jupiter quote udah cukup akurat sebagai gatekeeper.
+// Nyalain cuma kalau resolver on-chain di mesin lo reliable (sandbox sering gagal).
+const ONCHAIN_VALIDATE = (process.env.ONCHAIN_VALIDATE || 'false') === 'true';
+export async function validateOnChain(opp) {
+  if (!ONCHAIN_VALIDATE) return true; // skip kalau gak di-enable
+  try {
+    const a = toJupDex(opp.dexA), b = toJupDex(opp.dexB);
+    const checks = [];
+    for (const [dex, jd] of [[opp.dexA, a], [opp.dexB, b]]) {
+      let r = null;
+      try {
+        if (jd === 'meteora') r = await resolveMeteora(SOL, opp.token_addr);
+        else if (jd === 'orca') r = await resolveOrca(SOL, opp.token_addr);
+        else if (jd === 'raydium') r = await resolveRaydium(SOL, opp.token_addr);
+      } catch { return true; }
+      checks.push(!!r);
+    }
+    return checks.every(Boolean);
+  } catch { return true; }
+}
+
 // ---- Kandidat dari DexScreener (cepat, parallel semua token) ----
-// Langsung pakai dexId DexScreener (raydium/orca/meteora) — gak perlu resolve on-chain,
-// Jupiter bisa quote langsung per-DEX.
 async function scanDexScreener(minPct) {
   const out = [];
   const tokens = WATCH_TOKEN_LIST;
@@ -26,7 +47,6 @@ async function scanDexScreener(minPct) {
         const dexA = toJupDex(o.dexA) ? o.dexA : null;
         const dexB = toJupDex(o.dexB) ? o.dexB : null;
         if (!dexA || !dexB) continue;
-        // Skip stablecoin (USDC/USDT) — gak di-execute, cuma bridge quote
         const STABLE = ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v','Es9vMFrzaCERmJfrF4H2FYPMvAj7QUWxXPgZEJBJ41jW'];
         if (STABLE.includes(o.token_addr)) continue;
         out.push({ token: o.token, token_addr: o.token_addr, dexA, dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscreener' });
@@ -37,7 +57,6 @@ async function scanDexScreener(minPct) {
 }
 
 // ---- Kandidat on-chain (Meteora/Orca/Raydium) HANYA buat token yg dapet opp DexScreener ----
-// Gak brute-force semua token (biar cepat). Cross-check harga SOL<->token di 2 DEX.
 async function scanOnChainFor(tokenList) {
   const out = [];
   await Promise.all(tokenList.map(async ([tokenMint, sym]) => {
@@ -86,14 +105,21 @@ export async function validateWithJupiter(opp, solAmount = 10_000_000) {
   } catch { return null; }
 }
 
-// ---- Scan utama: DexScreener (parallel, semua DEX termasuk raydium) -> validate Jupiter ----
+// ---- Scan utama: DexScreener (parallel) + on-chain double-check ----
 export async function scanAll(minPct = AGGRESSIVE_THRESHOLD) {
   const seen = new Map();
   const push = (o) => {
     const key = `${o.token_addr}:${o.dexA}:${o.dexB}`;
     if (!seen.has(key) || o.pct > seen.get(key).pct) seen.set(key, o);
   };
-  const ds = await scanDexScreener(minPct); // parallel, ~5s, semua DEX (raydium/orca/meteora)
+  const ds = await scanDexScreener(minPct);
   ds.forEach(push);
+  const uniqueTokens = [...new Set(ds.map(d => d.token_addr))].map(mk => {
+    const t = ds.find(x => x.token_addr === mk); return [mk, t.token];
+  });
+  if (uniqueTokens.length) {
+    const oc = await scanOnChainFor(uniqueTokens);
+    oc.forEach(push);
+  }
   return [...seen.values()].sort((a, b) => b.pct - a.pct);
 }

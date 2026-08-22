@@ -23,7 +23,7 @@ export const DEX_PROGRAM_IDS = {
   RAYDIUM_V4: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
   RAYDIUM_CPMM: 'CPMMoo8L3F4NbTegBCKVNunggAiXnqqN1DZG1fekEju6',
   METEORA_DLMM: 'LbVRzDTjHzY9fAPw7CcpQ5S9UfeCdXsB8oaR5wWn9jS',
-  ORCA_WHIRLPOOL: 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',
+  ORCA_WHIRLPOOL: 'whirLbMiicVdio4qvG2f3nNBdmdsTG4cYd8dQLfXJEu',
   JUPITER_V6: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
 };
 
@@ -65,3 +65,4 @@ export const SOL = 'So11111111111111111111111111111111111111112';
 
 // Jito tip account (standard)
 export const JITO_TIP_ACCOUNT = 'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY';
+

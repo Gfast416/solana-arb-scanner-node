@@ -1,37 +1,36 @@
-// run_sol.js — SOL-centric live loop (cross-dex + circular, safer version)
+// run_sol.js — SOL-centric live loop (cross-dex + circular), safer + faster + risk-managed
 import 'dotenv/config';
 import { Connection, VersionedTransaction } from '@solana/web3.js';
-import { loadKeypair, USE_JITO } from './executor.js';
+import { loadKeypair } from './executor.js';
 import { WATCH_TOKENS, nextRpcUrl, SOL } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouterFast } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
-import { scanAll } from './multi_scanner.js';
+import { scanAll, validateOnChain } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
+import * as risk from './risk.js';
+import * as metrics from './metrics.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
 let MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.05');
-// Auto-clamp: kalau MIN_NET (modal * pct) > 2x tip, turunin biar opp kecil gak false-skip
 const _modalSol = (parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000')) / 1e9;
 const _autoNet = _modalSol * (MIN_PROFIT_PCT / 100);
-if (_autoNet > 0.000005) { // > 0.000005 SOL min net = terlalu tinggi buat test kecil
+if (_autoNet > 0.000005) {
   MIN_PROFIT_PCT = Math.max(0.01, (0.000002 / _modalSol) * 100);
   console.log(`  ⚠️ MIN_PROFIT_PCT auto-clamp ke ${MIN_PROFIT_PCT.toFixed(2)}% (biar opp kecil gak false-skip)`);
 }
-const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
 const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
 const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
 const JITO_URL = `https://${JITO_REGION}.bundle-router.jito.wtf/api/v1/bundles`;
-const LOOP_MS = parseInt(process.env.LOOP_MS || '12000');
-const MIN_WALLET_SOL = 0.02; // minimal SOL di wallet biar gak kehabisan fee
+const LOOP_MS = parseInt(process.env.LOOP_MS || '4000'); // TURUN 12s -> 4s
+const MAX_CANDIDATES = parseInt(process.env.MAX_CANDIDATES || '3'); // paralel N candidate
+const MIN_WALLET_SOL = 0.02;
 
-// Detect aja (gak validate) — biar cepat. Validate = build langsung di loop.
-async function findSolOpp() {
+async function findSolOpps() {
   try {
     const cands = await scanAll(MIN_PROFIT_PCT);
-    if (cands.length) return { type: 'cross_dex', opp: cands[0] };
-  } catch (_) {}
-  return null;
+    return cands.filter(c => !risk.isBlacklisted(c.token_addr)).slice(0, MAX_CANDIDATES);
+  } catch (_) { return []; }
 }
 
 async function submitBundle(rawBase64) {
@@ -43,45 +42,51 @@ async function submitBundle(rawBase64) {
   return res.json();
 }
 
-async function safeExecute(rawBase64, profitSol, label) {
-  // 1. Deserialize & simulate
+async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
   const vtx = VersionedTransaction.deserialize(Buffer.from(rawBase64, 'base64'));
+  metrics.markStage('sim');
   const sim = await simulateTx(vtx);
+  metrics.endStage('sim');
   if (!sim.ok) {
-    // 6024/6025 = slippage/stale quote -> caller bisa rebuild dari quote fresh
-    // InvalidSeeds = ATA extract rusak (intermittent) -> rebuild juga bisa bener
     const isRetryable = /6024|6025|0x1788|0x1789|InvalidSeeds|InvalidAccountData/.test(sim.err || '');
     if (isRetryable) { log(`[RETRY] slippage/stale: ${sim.err}`, 'info'); return { retry: true, reason: sim.err }; }
     log(`[SIM FAIL] ${label}: ${sim.err}`, 'err');
     if (sim.logs) console.log('  logs:', sim.logs.join(' | '));
+    metrics.inc('simFail');
     return { retry: false };
   }
+  metrics.inc('simOk');
   log(`[SIM OK] ${label} units=${sim.units} profit~${profitSol?.toFixed(6)} SOL`, 'ok');
 
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
-  // 2. Profit guard — persentase dari modal, floor cuma tip (biar opp kecil bisa execute)
-  // epsilon 0.9x biar gak false-skip gara2 float rounding
-  const MIN_NET = Math.max(TIP / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100)) * 0.9;
+  const TIP = risk.dynamicTip();
+  const MIN_NET = Math.max(TIP / 1e9, (_modalSol) * (MIN_PROFIT_PCT / 100)) * 0.9;
   if (profitSol <= MIN_NET) {
-    log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
+    log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)}`, 'err');
     return { retry: false };
   }
 
-  // 3. Submit + confirm via bundle status polling
   const res = await submitBundle(rawBase64);
   if (res?.result) {
-    log(`[SUBMITTED] bundle ${res.result}`, 'ok');
-    // Polling status (terkirim != sukses)
+    log(`[SUBMITTED] bundle ${res.result} tip=${TIP}`, 'ok');
+    metrics.inc('submitted');
     const status = await pollBundleStatus(res.result);
     log(`[BUNDLE STATUS] ${status}`, 'info');
+    if (status === 'confirmed' || status === 'finalized' || status === 'landed') {
+      metrics.inc('landed');
+      risk.recordSuccess(profitSol);
+    } else {
+      risk.recordFail(0); // gagal land, consec fail++
+      if (tokenAddr) risk.blacklistToken(tokenAddr);
+    }
   } else {
     log(`[SUBMIT ERR] ${JSON.stringify(res).slice(0, 120)}`, 'err');
+    risk.recordFail(0);
   }
   return { retry: false };
 }
 
-// Poll getBundleStatuses sampai landed/confirmed/rejected
 async function pollBundleStatus(bundleId, maxAttempts = 30) {
   for (let i = 0; i < maxAttempts; i++) {
     try {
@@ -99,56 +104,73 @@ async function pollBundleStatus(bundleId, maxAttempts = 30) {
   return 'timeout';
 }
 
+async function tryCrossDex(o, payer) {
+  metrics.inc('scanned');
+  // On-chain double-check (kurangi DexScreener false positive)
+  const ok = await validateOnChain(o).catch(() => true); // kalau RPC error, tetep lanjut (Jupiter yg validasi)
+  if (!ok) { metrics.inc('falsePositive'); log(`[SKIP] onchain pool missing ${o.token} ${o.dexA}/${o.dexB}`, 'err'); return true; }
+  let executed = false;
+  for (let attempt = 0; attempt < 3 && !executed; attempt++) {
+    if (attempt > 0) log(`  retry build (slippage) attempt ${attempt+1}/3...`);
+    try {
+      metrics.markStage('build');
+      const r = await buildSolRouterFast(o, payer, SOL_AMOUNT, risk.dynamicTip());
+      metrics.endStage('build');
+      metrics.inc('built');
+      const res = await safeExecute(r.raw, r.profitSol, r.engine, o.token_addr);
+      if (res && res.retry) { await sleep(500); continue; }
+      executed = true;
+    } catch (e) {
+      if (/6024|6025|0x1788|0x1789/.test(e.message || '')) { await sleep(500); continue; }
+      metrics.inc('falsePositive');
+      log(`[BUILD ERR] ${e.message?.slice(0, 70)}`, 'err');
+      risk.blacklistToken(o.token_addr);
+      break;
+    }
+  }
+  return executed;
+}
+
 async function loop() {
   console.log('='.repeat(60));
-  console.log(' SOL-CENTRIC ARB (cross-dex + circular) — safer version');
+  console.log(' SOL-CENTRIC ARB (cross-dex + circular) — v2 faster+risk');
   console.log('='.repeat(60));
   console.log(` DRY_RUN=${DRY_RUN} | MIN_PROFIT=${MIN_PROFIT_PCT}% | SOL/test=${SOL_AMOUNT / 1e9}`);
-  console.log(` JITO=${JITO_REGION} | LOOP=${LOOP_MS}ms`);
+  console.log(` JITO=${JITO_REGION} | LOOP=${LOOP_MS}ms | PARALLEL=${MAX_CANDIDATES}`);
   const payer = loadKeypair(process.env.WALLET_PRIVATE_KEY);
   console.log(` WALLET: ${payer.publicKey.toBase58()}`);
 
   while (true) {
     try {
-      // Cek balance dulu
-      const bal = await getSolBalance(payer.publicKey.toBase58());
-      if (bal / 1e9 < MIN_WALLET_SOL) {
-        log(`Wallet SOL terlalu rendah (${(bal / 1e9).toFixed(4)}). Stop.`, 'err');
-        break;
-      }
+      // Circuit breaker
+      const cb = risk.isCircuitOpen();
+      if (cb.open) { log(`🛑 CIRCUIT OPEN: ${cb.reason}. Stop.`, 'err'); break; }
 
-      // 1) Cross-dex — 1x quote forced-dex + build + sim (FAST PATH, ~2s)
-      const found = await findSolOpp();
-      if (found) {
-        const o = found.opp;
-        log(`OPP cross_dex ${o.token} ${o.pct}% ${o.dexA}->${o.dexB}`);
-        let executed = false;
-        for (let attempt = 0; attempt < 3 && !executed; attempt++) {
-          if (attempt > 0) log(`  retry build (slippage) attempt ${attempt+1}/3...`);
-          try {
-            const r = await buildSolRouterFast(o, payer, SOL_AMOUNT, TIP);
-            const res = await safeExecute(r.raw, r.profitSol, r.engine);
-            if (res && res.retry) { await sleep(500); continue; } // stale -> rebuild fresh
-            executed = true;
-          } catch (e) {
-            if (/6024|6025|0x1788|0x1789/.test(e.message||'')) { await sleep(500); continue; }
-            log(`[BUILD ERR] ${e.message?.slice(0, 70)}`, 'err');
-            break;
-          }
+      const bal = await getSolBalance(payer.publicKey.toBase58());
+      if (bal / 1e9 < MIN_WALLET_SOL) { log(`Wallet SOL terlalu rendah. Stop.`, 'err'); break; }
+
+      // 1) Cross-dex (parallel N candidate)
+      const found = await findSolOpps();
+      if (found.length) {
+        for (const o of found) {
+          log(`OPP cross_dex ${o.token} ${o.pct}% ${o.dexA}->${o.dexB}`);
+          await tryCrossDex(o, payer);
         }
       } else {
-        // 2) Circular
+        // 2) Circular fallback
         const circ = await findCircular(SOL_AMOUNT);
         if (circ) {
           log(`OPP circular ${circ.path.map(p => p.slice(0, 4)).join('→')} +${circ.profit.toFixed(6)} SOL`);
           try {
-            const tx = await buildCircularTx(circ, payer, TIP);
+            const tx = await buildCircularTx(circ, payer, risk.dynamicTip());
             if (tx.ok) await safeExecute(tx.raw, circ.profit, 'circular');
           } catch (e) { log(`circular build fail: ${e.message?.slice(0, 80)}`, 'err'); }
         } else {
           log('no opp, waiting...');
         }
       }
+      // Metrics tiap loop
+      if (Math.random() < 0.1) log(metrics.summary(), 'info');
     } catch (e) {
       log(`loop err: ${String(e).slice(0, 120)}`, 'err');
     }
