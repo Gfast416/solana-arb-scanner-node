@@ -80,37 +80,47 @@ async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
   const TIP = risk.dynamicTip();
-  const MIN_NET = Math.max(TIP / 1e9, (_modalSol) * (MIN_PROFIT_PCT / 100)) * 0.9;
+  const MIN_NET = Math.max(TIP / 1e9, (_modalSol) * (MIN_PROFIT_PCT / 100)) * 0.5; // 0.5x epsilon
   if (profitSol <= MIN_NET) {
     log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)}`, 'err');
     return { retry: false };
   }
 
   let res;
+  const USE_JITO = (process.env.USE_JITO || 'true') === 'true';
+  if (USE_JITO) {
+    try {
+      res = await submitBundle(rawBase64);
+      if (res?.result) {
+        log(`[SUBMITTED] bundle ${res.result} tip=${TIP}`, 'ok');
+        metrics.inc('submitted');
+        const status = await pollBundleStatus(res.result);
+        log(`[BUNDLE STATUS] ${status}`, 'info');
+        if (status === 'confirmed' || status === 'finalized' || status === 'landed') {
+          metrics.inc('landed');
+          risk.recordSuccess(profitSol);
+        } else {
+          risk.recordFail(0);
+          if (tokenAddr) risk.blacklistToken(tokenAddr);
+        }
+        return { retry: false };
+      }
+    } catch (e) {
+      log(`[JITO FAIL] ${e.message?.slice(0, 50)} -> fallback RPC`, 'err');
+    }
+  }
+  // FALLBACK: submit langsung lewat RPC (skip preflight biar cepat)
   try {
-    res = await submitBundle(rawBase64);
+    const conn = new Connection(nextRpcUrl(), 'confirmed');
+    const sig = await conn.sendRawTransaction(Buffer.from(rawBase64, 'base64'), { skipPreflight: true, maxRetries: 2 });
+    log(`[RPC SUBMITTED] ${sig.slice(0, 16)}... (no Jito tip, priority 0)`, 'ok');
+    metrics.inc('submitted');
+    risk.recordSuccess(profitSol);
+    return { retry: false };
   } catch (e) {
-    // fetch failed = network error (bukan token/build error) -> jangan blacklist, retry next loop
     log(`[SUBMIT NET ERR] ${e.message?.slice(0, 50)} (retry next round)`, 'err');
     return { retry: false };
   }
-  if (res?.result) {
-    log(`[SUBMITTED] bundle ${res.result} tip=${TIP}`, 'ok');
-    metrics.inc('submitted');
-    const status = await pollBundleStatus(res.result);
-    log(`[BUNDLE STATUS] ${status}`, 'info');
-    if (status === 'confirmed' || status === 'finalized' || status === 'landed') {
-      metrics.inc('landed');
-      risk.recordSuccess(profitSol);
-    } else {
-      risk.recordFail(0);
-      if (tokenAddr) risk.blacklistToken(tokenAddr);
-    }
-  } else {
-    log(`[SUBMIT ERR] ${JSON.stringify(res).slice(0, 120)}`, 'err');
-    risk.recordFail(0);
-  }
-  return { retry: false };
 }
 
 async function pollBundleStatus(bundleId, maxAttempts = 30) {
