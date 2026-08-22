@@ -6,7 +6,7 @@ import { WATCH_TOKENS, nextRpcUrl, SOL } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
 import { buildSolRouter } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
-import { scanAll, validateWithJupiter } from './multi_scanner.js';
+import { scanAll } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
@@ -25,14 +25,11 @@ const JITO_URL = `https://${JITO_REGION}.bundle-router.jito.wtf/api/v1/bundles`;
 const LOOP_MS = parseInt(process.env.LOOP_MS || '12000');
 const MIN_WALLET_SOL = 0.02; // minimal SOL di wallet biar gak kehabisan fee
 
+// Detect aja (gak validate) — biar cepat. Validate = build langsung di loop.
 async function findSolOpp() {
-  // Scan dari BANYAK sumber (DexScreener + on-chain Meteora/Orca/Raydium), lalu validasi Jupiter
   try {
     const cands = await scanAll(MIN_PROFIT_PCT);
-    for (const c of cands) {
-      const v = await validateWithJupiter(c, SOL_AMOUNT);
-      if (v && v.profitSol > 0) return { type: 'cross_dex', opp: v };
-    }
+    if (cands.length) return { type: 'cross_dex', opp: cands[0] };
   } catch (_) {}
   return null;
 }
@@ -120,19 +117,24 @@ async function loop() {
         break;
       }
 
-      // 1) Cross-dex — rebuild sampai 3x kalau kena slippage (quote stale)
+      // 1) Cross-dex — 1x quote forced-dex + build + sim (FAST PATH, ~2s)
       const found = await findSolOpp();
       if (found) {
         const o = found.opp;
-        log(`OPP cross_dex ${o.token} ${o.pct}% ${o.route}`);
+        log(`OPP cross_dex ${o.token} ${o.pct}% ${o.dexA}->${o.dexB}`);
         let executed = false;
         for (let attempt = 0; attempt < 3 && !executed; attempt++) {
           if (attempt > 0) log(`  retry build (slippage) attempt ${attempt+1}/3...`);
-          const r = await buildSolRouter(o, payer, SOL_AMOUNT, TIP);
-          if (!r.ok) { log(`[SKIP] ${r.reason}`, 'err'); break; }
-          const res = await safeExecute(r.raw, r.profit_sol, r.engine);
-          if (res && res.retry) { await sleep(800); continue; } // quote stale -> rebuild fresh
-          executed = true;
+          try {
+            const r = await buildSolRouterFast(o, payer, SOL_AMOUNT, TIP);
+            const res = await safeExecute(r.raw, r.profitSol, r.engine);
+            if (res && res.retry) { await sleep(500); continue; } // stale -> rebuild fresh
+            executed = true;
+          } catch (e) {
+            if (/6024|6025|0x1788|0x1789/.test(e.message||'')) { await sleep(500); continue; }
+            log(`[BUILD ERR] ${e.message?.slice(0, 70)}`, 'err');
+            break;
+          }
         }
       } else {
         // 2) Circular
