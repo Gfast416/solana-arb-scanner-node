@@ -4,6 +4,7 @@
 import { Connection, VersionedTransaction } from '@solana/web3.js';
 import { SOL, nextRpcUrl } from './config.js';
 import { getQuote, buildAtomicTx } from './build_atomic_tx.js';
+import { sleep } from './utils.js';
 
 const JUP_DEX = { raydium: 'raydium', orca: 'orca', meteora: 'meteora', whirlpool: 'orca', 'raydium-clmm': 'raydium-clmm' };
 function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
@@ -36,11 +37,17 @@ export async function buildSolRouterFast(opp, payer, solAmountLamports = 10_000_
     const profitSol = (Number(q2.outAmount) - solAmountLamports) / 1e9;
     return { raw: Buffer.from(vtx.serialize()).toString('base64'), profitSol, engine };
   } catch (e) {
-    // Kalau forced-dex gagal extract (ALT unresolved), fallback ke aggregate quote (gak dex filter)
-    if (/BUILD EMPTY|ALT/i.test(e.message || '')) {
+    // Forced-dex gagal (ALT unresolved / swap err / deserialize) -> fallback aggregate (gak dex filter)
+    if (/BUILD EMPTY|ALT|swap err|deserialize/i.test(e.message || '')) {
+      await sleep(1000); // jeda biar gak rate-limit beruntun
       const q1b = await getQuote(SOL, tokenMint, solAmountLamports, SLIP, {});
       const q2b = await getQuote(tokenMint, SOL, Number(q1b.outAmount), SLIP, {});
-      const vtx = await buildAtomicTx([q1b, q2b], payer, conn, tipLamports);
+      // retry aggregate build 2x kalau swap err
+      let vtx;
+      for (let i = 0; i < 2; i++) {
+        try { vtx = await buildAtomicTx([q1b, q2b], payer, conn, tipLamports); break; }
+        catch (e2) { if (i === 1) throw e2; await sleep(1500); }
+      }
       const profitSol = (Number(q2b.outAmount) - solAmountLamports) / 1e9;
       return { raw: Buffer.from(vtx.serialize()).toString('base64'), profitSol, engine: `sol->aggregate->sol (fallback)` };
     }
