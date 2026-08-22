@@ -10,7 +10,14 @@ import { scanAll, validateWithJupiter } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
-const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.05');
+let MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.05');
+// Auto-clamp: kalau MIN_NET (modal * pct) > 2x tip, turunin biar opp kecil gak false-skip
+const _modalSol = (parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000')) / 1e9;
+const _autoNet = _modalSol * (MIN_PROFIT_PCT / 100);
+if (_autoNet > 0.00002) { // > 0.00002 SOL min net = terlalu tinggi buat test kecil
+  MIN_PROFIT_PCT = Math.max(0.05, (0.00001 / _modalSol) * 100);
+  console.log(`  ⚠️ MIN_PROFIT_PCT auto-clamp ke ${MIN_PROFIT_PCT.toFixed(2)}% (biar opp kecil gak false-skip)`);
+}
 const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
 const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
 const JITO_REGION = process.env.JITO_REGION || 'frankfurt';

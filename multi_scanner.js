@@ -23,10 +23,12 @@ async function scanDexScreener(minPct) {
       if (!d?.pairs) return;
       const opps = findMispricing(d.pairs, minPct).filter(o => o.token_addr && o.token_addr !== SOL);
       for (const o of opps) {
-        // Normalisasi dexId ke Jupiter dex name
         const dexA = toJupDex(o.dexA) ? o.dexA : null;
         const dexB = toJupDex(o.dexB) ? o.dexB : null;
-        if (!dexA || !dexB) continue; // skip dex yang Jupiter gak support
+        if (!dexA || !dexB) continue;
+        // Skip stablecoin (USDC/USDT) — gak di-execute, cuma bridge quote
+        const STABLE = ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v','Es9vMFrzaCERmJfrF4H2FYPMvAj7QUWxXPgZEJBJ41jW'];
+        if (STABLE.includes(o.token_addr)) continue;
         out.push({ token: o.token, token_addr: o.token_addr, dexA, dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscreener' });
       }
     } catch (_) {}
