@@ -20,7 +20,8 @@ if (_autoNet > 0.000005) {
   console.log(`  ⚠️ MIN_PROFIT_PCT auto-clamp ke ${MIN_PROFIT_PCT.toFixed(2)}% (biar opp kecil gak false-skip)`);
 }
 const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
-const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
+const JITO_REGIONS = (process.env.JITO_REGIONS || 'frankfurt,nyc,amsterdam,tokyo').split(',').map(s => s.trim()).filter(Boolean);
+const JITO_REGION = process.env.JITO_REGION || JITO_REGIONS[0];
 const JITO_URL = `https://${JITO_REGION}.bundle-router.jito.wtf/api/v1/bundles`;
 const LOOP_MS = parseInt(process.env.LOOP_MS || '4000'); // TURUN 12s -> 4s
 const MAX_CANDIDATES = parseInt(process.env.MAX_CANDIDATES || '3'); // paralel N candidate
@@ -33,13 +34,31 @@ async function findSolOpps() {
   } catch (_) { return []; }
 }
 
-async function submitBundle(rawBase64) {
-  const res = await fetch(JITO_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[rawBase64]] }),
-  });
-  return res.json();
+async function submitBundle(rawBase64, retries = 3) {
+  let lastErr;
+  // Coba semua region (fallback kalau 1 region unreachable)
+  for (const region of JITO_REGIONS) {
+    const url = `https://${region}.bundle-router.jito.wtf/api/v1/bundles`;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[rawBase64]] }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const j = await res.json();
+        if (j?.result) { JITO_REGION = region; return j; } // sukses, update region
+        if (j?.error) { lastErr = new Error(JSON.stringify(j.error).slice(0, 80)); continue; }
+        return j;
+      } catch (e) {
+        lastErr = e;
+        log(`[JITO ${region}] fetch failed (attempt ${i+1}/${retries}): ${e.message?.slice(0,40)}`, 'info');
+        await sleep(800 * (i + 1));
+      }
+    }
+  }
+  throw lastErr || new Error('jito submit failed all regions');
 }
 
 async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
@@ -67,7 +86,14 @@ async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
     return { retry: false };
   }
 
-  const res = await submitBundle(rawBase64);
+  let res;
+  try {
+    res = await submitBundle(rawBase64);
+  } catch (e) {
+    // fetch failed = network error (bukan token/build error) -> jangan blacklist, retry next loop
+    log(`[SUBMIT NET ERR] ${e.message?.slice(0, 50)} (retry next round)`, 'err');
+    return { retry: false };
+  }
   if (res?.result) {
     log(`[SUBMITTED] bundle ${res.result} tip=${TIP}`, 'ok');
     metrics.inc('submitted');
@@ -77,7 +103,7 @@ async function safeExecute(rawBase64, profitSol, label, tokenAddr) {
       metrics.inc('landed');
       risk.recordSuccess(profitSol);
     } else {
-      risk.recordFail(0); // gagal land, consec fail++
+      risk.recordFail(0);
       if (tokenAddr) risk.blacklistToken(tokenAddr);
     }
   } else {
@@ -122,6 +148,8 @@ async function tryCrossDex(o, payer) {
       executed = true;
     } catch (e) {
       if (/6024|6025|0x1788|0x1789/.test(e.message || '')) { await sleep(500); continue; }
+      // fetch failed = network error (RPC/Jito), BUKAN token error -> jangan blacklist, retry loop
+      if (/fetch failed|network|ECONN|ETIMEDOUT|timeout/i.test(e.message || '')) { await sleep(800); continue; }
       metrics.inc('falsePositive');
       log(`[BUILD ERR] ${e.message?.slice(0, 70)}`, 'err');
       risk.blacklistToken(o.token_addr);
