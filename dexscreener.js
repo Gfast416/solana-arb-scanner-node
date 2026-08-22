@@ -47,10 +47,14 @@ export function findMispricing(pairs, thresholdPct = 3.0) {
       // FILTER 1: DEX harus beda (gak bandingin meteora vs meteora)
       if (a.dexId === b.dexId) continue;
       const pa = parseFloat(a.priceUsd), pb = parseFloat(b.priceUsd);
-      // FILTER 2: outlier — 1 price >10x median atau <0.1x median = price kotor
-      if (median > 0 && (pa > median * 10 || pa < median * 0.1)) continue;
-      if (median > 0 && (pb > median * 10 || pb < median * 0.1)) continue;
-      // FILTER 3: likuiditas minimal $5000 biar gak false positive (USD2 dll likuiditas kecil)
+      // FILTER 2: outlier — price kotor dari pool decimal beda
+      // Tapi DEX liquid (raydium/orca/meteora) gak di-skip (harga valid)
+      const isLiquidDex = (d) => ['raydium','orca','meteora','whirlpool'].includes((d||'').toLowerCase());
+      if (!isLiquidDex(a.dexId) && !isLiquidDex(b.dexId)) {
+        if (median > 0 && (pa > median * 10 || pa < median * 0.1)) continue;
+        if (median > 0 && (pb > median * 10 || pb < median * 0.1)) continue;
+      }
+      // FILTER 3: likuiditas minimal $5000 biar gak false positive
       const liqA = Number(a.liquidity?.usd || 0);
       const liqB = Number(b.liquidity?.usd || 0);
       if (liqA < 5000 || liqB < 5000) continue;

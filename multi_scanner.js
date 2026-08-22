@@ -12,6 +12,8 @@ function toJupDex(d) { return JUP_DEX[(d || '').toLowerCase()] || null; }
 export const DEX_LIST = ['meteora', 'orca', 'raydium'];
 
 // ---- Kandidat dari DexScreener (cepat, parallel semua token) ----
+// Langsung pakai dexId DexScreener (raydium/orca/meteora) — gak perlu resolve on-chain,
+// Jupiter bisa quote langsung per-DEX.
 async function scanDexScreener(minPct) {
   const out = [];
   const tokens = WATCH_TOKEN_LIST;
@@ -20,7 +22,13 @@ async function scanDexScreener(minPct) {
       const d = await pairsByToken(mint);
       if (!d?.pairs) return;
       const opps = findMispricing(d.pairs, minPct).filter(o => o.token_addr && o.token_addr !== SOL);
-      for (const o of opps) out.push({ token: o.token, token_addr: o.token_addr, dexA: o.dexA, dexB: o.dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscrest' });
+      for (const o of opps) {
+        // Normalisasi dexId ke Jupiter dex name
+        const dexA = toJupDex(o.dexA) ? o.dexA : null;
+        const dexB = toJupDex(o.dexB) ? o.dexB : null;
+        if (!dexA || !dexB) continue; // skip dex yang Jupiter gak support
+        out.push({ token: o.token, token_addr: o.token_addr, dexA, dexB, priceA: o.priceA, priceB: o.priceB, pct: o.pct, source: 'dexscreener' });
+      }
     } catch (_) {}
   }));
   return out;
@@ -76,21 +84,14 @@ export async function validateWithJupiter(opp, solAmount = 10_000_000) {
   } catch { return null; }
 }
 
-// ---- Scan utama: DexScreener dulu (parallel), on-chain bonus buat token yg dapet opp ----
+// ---- Scan utama: DexScreener (parallel, semua DEX termasuk raydium) -> validate Jupiter ----
 export async function scanAll(minPct = AGGRESSIVE_THRESHOLD) {
   const seen = new Map();
   const push = (o) => {
     const key = `${o.token_addr}:${o.dexA}:${o.dexB}`;
     if (!seen.has(key) || o.pct > seen.get(key).pct) seen.set(key, o);
   };
-  const ds = await scanDexScreener(minPct);
+  const ds = await scanDexScreener(minPct); // parallel, ~5s, semua DEX (raydium/orca/meteora)
   ds.forEach(push);
-  const uniqueTokens = [...new Set(ds.map(d => d.token_addr))].map(m => {
-    const t = ds.find(x => x.token_addr === m); return [m, t.token];
-  });
-  if (uniqueTokens.length) {
-    const oc = await scanOnChainFor(uniqueTokens);
-    oc.forEach(push);
-  }
   return [...seen.values()].sort((a, b) => b.pct - a.pct);
 }
