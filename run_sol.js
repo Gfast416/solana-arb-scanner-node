@@ -4,7 +4,7 @@ import { Connection, VersionedTransaction } from '@solana/web3.js';
 import { loadKeypair, USE_JITO } from './executor.js';
 import { WATCH_TOKENS, nextRpcUrl, SOL } from './config.js';
 import { pairsByToken, findMispricing } from './dexscreener.js';
-import { buildSolRouter } from './sol_router.js';
+import { buildSolRouterFast } from './sol_router.js';
 import { findCircular, buildCircularTx } from './circular.js';
 import { scanAll } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
