@@ -10,7 +10,7 @@ import { scanAll, validateWithJupiter } from './multi_scanner.js';
 import { simulateTx, getSolBalance, log, sleep } from './utils.js';
 
 const DRY_RUN = (process.env.DRY_RUN || 'true') === 'true';
-const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.1');
+const MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.05');
 const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
 const SOL_AMOUNT = parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000');
 const JITO_REGION = process.env.JITO_REGION || 'frankfurt';
