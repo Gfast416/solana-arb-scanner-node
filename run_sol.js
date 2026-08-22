@@ -14,8 +14,8 @@ let MIN_PROFIT_PCT = parseFloat(process.env.MIN_PROFIT_PCT || '0.05');
 // Auto-clamp: kalau MIN_NET (modal * pct) > 2x tip, turunin biar opp kecil gak false-skip
 const _modalSol = (parseInt(process.env.SOL_AMOUNT_LAMPORTS || '10000000')) / 1e9;
 const _autoNet = _modalSol * (MIN_PROFIT_PCT / 100);
-if (_autoNet > 0.00002) { // > 0.00002 SOL min net = terlalu tinggi buat test kecil
-  MIN_PROFIT_PCT = Math.max(0.05, (0.00001 / _modalSol) * 100);
+if (_autoNet > 0.000005) { // > 0.000005 SOL min net = terlalu tinggi buat test kecil
+  MIN_PROFIT_PCT = Math.max(0.01, (0.000002 / _modalSol) * 100);
   console.log(`  ⚠️ MIN_PROFIT_PCT auto-clamp ke ${MIN_PROFIT_PCT.toFixed(2)}% (biar opp kecil gak false-skip)`);
 }
 const TIP = parseInt(process.env.JITO_TIP_LAMPORTS || '5000');
@@ -54,7 +54,7 @@ async function safeExecute(rawBase64, profitSol, label) {
     // 6024/6025 = slippage/stale quote -> caller bisa rebuild dari quote fresh
     // InvalidSeeds = ATA extract rusak (intermittent) -> rebuild juga bisa bener
     const isRetryable = /6024|6025|0x1788|0x1789|InvalidSeeds|InvalidAccountData/.test(sim.err || '');
-    if (isRetryable) return { retry: true, reason: sim.err };
+    if (isRetryable) { log(`[RETRY] slippage/stale: ${sim.err}`, 'info'); return { retry: true, reason: sim.err }; }
     log(`[SIM FAIL] ${label}: ${sim.err}`, 'err');
     if (sim.logs) console.log('  logs:', sim.logs.join(' | '));
     return { retry: false };
@@ -64,7 +64,8 @@ async function safeExecute(rawBase64, profitSol, label) {
   if (DRY_RUN) { log('[DRY_RUN] not submitting', 'info'); return { retry: false }; }
 
   // 2. Profit guard — persentase dari modal, floor cuma tip (biar opp kecil bisa execute)
-  const MIN_NET = Math.max(TIP / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100));
+  // epsilon 0.9x biar gak false-skip gara2 float rounding
+  const MIN_NET = Math.max(TIP / 1e9, (SOL_AMOUNT / 1e9) * (MIN_PROFIT_PCT / 100)) * 0.9;
   if (profitSol <= MIN_NET) {
     log(`[SKIP] profit ${profitSol?.toFixed(6)} <= min net ${MIN_NET.toFixed(6)} (${MIN_PROFIT_PCT}% dari modal)`, 'err');
     return { retry: false };

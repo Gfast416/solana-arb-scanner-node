@@ -39,13 +39,8 @@ export async function buildSolRouter(opp, payer, solAmountLamports = 1_000_000, 
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // Kalau udah divalidasi Jupiter (ada quotes), pakai langsung. Else build ulang.
-      let built;
-      if (opp.quotes && opp.quotes.length === 2) {
-        built = { quotes: opp.quotes, profit: opp.profitSol, engine: opp.engine };
-      } else {
-        built = await buildQuotes(opp, solAmountLamports);
-      }
+      // SELALU rebuild quote fresh (gak pakai opp.quotes lama -> hindari stale 6024)
+      const built = await buildQuotes(opp, solAmountLamports);
       if (!built) return { ok: false, reason: 'no SOL/USDC pool', profit_sol: 0 };
       if (built.profit <= 0) return { ok: false, reason: `no profit (${built.profit.toFixed(6)} SOL)`, profit_sol: built.profit };
       const conn = new Connection(nextRpcUrl(), 'confirmed');
